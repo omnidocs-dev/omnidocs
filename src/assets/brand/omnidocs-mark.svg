@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>OmniDocs</title>
+  <rect width="64" height="64" rx="18" fill="#FFC35F"/>
+  <path d="M25 13H36L49 26V40C49 48 43 53 35 53H28C20 53 15 48 15 40V25C15 18 18 13 25 13Z" stroke="#1D1C1A" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M36 14V23C36 25 37 26 39 26H48" stroke="#1D1C1A" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M27 34H35C38 34 39 35 39 38M27 34V43" stroke="#1D1C1A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="23" y="30" width="8" height="8" rx="2.5" fill="#1D1C1A"/>
+  <rect x="35" y="36" width="8" height="8" rx="2.5" fill="#1D1C1A"/>
+  <rect x="23" y="42" width="8" height="8" rx="2.5" fill="#1D1C1A"/>
+</svg>

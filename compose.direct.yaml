@@ -1,0 +1,8 @@
+services:
+  backend:
+    command: ["node", "--import", "tsx", "server/index.ts", "--production"]
+    environment:
+      OMNIDOCS_PUBLIC_URL: http://127.0.0.1:8417
+      OMNIDOCS_BEHIND_PROXY: "0"
+    ports:
+      - "127.0.0.1:8417:4174"

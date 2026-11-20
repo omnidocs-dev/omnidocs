@@ -1,0 +1,16 @@
+services:
+  backend:
+    depends_on: !reset {}
+    environment:
+      DATABASE_URL: ${OMNIDOCS_DATABASE_URL:?Set the external PostgreSQL URL with ./omnidocs setup}
+      OMNIDOCS_POSTGRES_HOST: ""
+      OMNIDOCS_POSTGRES_PASSWORD: ""
+  database:
+    profiles: ["bundled-database"]
+  database-tools:
+    image: postgres:18-bookworm
+    profiles: ["maintenance"]
+    environment:
+      DATABASE_URL: ${OMNIDOCS_DATABASE_URL:?Set the external PostgreSQL URL with ./omnidocs setup}
+    networks:
+      - web

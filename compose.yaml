@@ -1,0 +1,100 @@
+name: omnidocs
+services:
+  frontend:
+    build:
+      context: .
+      target: frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      OMNIDOCS_SITE_HOST: ${OMNIDOCS_SITE_HOST:-localhost}
+      OMNIDOCS_ADMIN_NETWORKS: ${OMNIDOCS_ADMIN_NETWORKS:-127.0.0.1/32 ::1/128}
+    ports:
+      - "${OMNIDOCS_BIND_ADDRESS:-127.0.0.1}:${OMNIDOCS_HTTPS_PORT:-8443}:443"
+    volumes:
+      - tls_data:/data
+      - tls_config:/config
+    networks:
+      - web
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:9080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+
+  backend:
+    build:
+      context: .
+      target: backend
+    command: ["node", "--import", "tsx", "server/index.ts"]
+    init: true
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      OMNIDOCS_PUBLIC_URL: https://${OMNIDOCS_SITE_HOST:-localhost}:${OMNIDOCS_HTTPS_PORT:-8443}
+      OMNIDOCS_BEHIND_PROXY: "1"
+      OMNIDOCS_DATABASE_ENGINE: postgres
+      OMNIDOCS_ADMIN_NETWORKS: ${OMNIDOCS_ADMIN_NETWORKS:-127.0.0.1/32 ::1/128}
+      OMNIDOCS_POSTGRES_HOST: database
+      OMNIDOCS_POSTGRES_PASSWORD: ${OMNIDOCS_POSTGRES_PASSWORD:-}
+      OMNIDOCS_ADMIN_USERNAME: ${OMNIDOCS_ADMIN_USERNAME:-admin}
+      OMNIDOCS_ADMIN_PASSWORD_HASH: ${OMNIDOCS_ADMIN_PASSWORD_HASH:-}
+      OMNIDOCS_ADMIN_TOTP_SECRET: ${OMNIDOCS_ADMIN_TOTP_SECRET:-}
+      OMNIDOCS_MAIL_WEBHOOK: ${OMNIDOCS_MAIL_WEBHOOK:-}
+      OMNIDOCS_MAIL_TOKEN: ${OMNIDOCS_MAIL_TOKEN:-}
+      OMNIDOCS_SECURITY_ALERT_WEBHOOK: ${OMNIDOCS_SECURITY_ALERT_WEBHOOK:-}
+      OMNIDOCS_SECURITY_ALERT_TOKEN: ${OMNIDOCS_SECURITY_ALERT_TOKEN:-}
+    volumes:
+      - workspace_data:/data
+    networks:
+      - web
+      - data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:4174/api/health')
+          .then(response=>{if(!response.ok)throw new Error('Readiness returned HTTP '+response.status)})
+          .catch(error=>{console.error(error.cause?.code||error.message);process.exitCode=1})
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  database:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: omnidocs
+      POSTGRES_USER: omnidocs
+      POSTGRES_PASSWORD: ${OMNIDOCS_POSTGRES_PASSWORD:-}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "omnidocs", "-d", "omnidocs"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+networks:
+  web:
+  data:
+    internal: true
+
+volumes:
+  tls_data:
+  tls_config:
+  workspace_data:
+  postgres_data:

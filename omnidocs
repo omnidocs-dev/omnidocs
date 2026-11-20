@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+caller_directory="$PWD"
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+umask 077
+backup_root="${OMNIDOCS_BACKUP_DIR:-$PWD/backups}"
+source scripts/compose-env.sh
+compose=(docker compose -f compose.yaml)
+services=(backend)
+direct=false
+external=false
+access_override=
+
+case "${1:-}" in
+  --direct) access_override=direct; shift;;
+  --https) access_override=https; shift;;
+esac
+if [[ "${access_override:-$(env_value OMNIDOCS_ACCESS_MODE)}" == direct ]]; then
+  compose+=(-f compose.direct.yaml)
+  direct=true
+else
+  services+=(frontend)
+fi
+if [[ "$(env_value OMNIDOCS_DATABASE_MODE)" == external ]]; then
+  compose+=(-f compose.external.yaml)
+  external=true
+else
+  services+=(database)
+fi
+
+usage() {
+  cat <<'USAGE'
+Usage: ./omnidocs [--direct|--https] COMMAND
+
+  setup                          Run the access, admin, email and database wizard
+  run                            Start the app and wait for its health checks
+  stop                           Stop the app and database
+  backup                         Save the database and workspace files
+  update                         Build the current source and update containers
+  restore BACKUP_DIR             Restore a backup after confirmation
+  admin status                   Show the administrator account from the database
+  admin rotate-otp               Reset the authenticator and show its new setup key once
+  admin rotate-password          Set a new administrator password in the database
+  logs [COMPOSE_OPTIONS...]      Show recent logs or follow with -f
+  status                         Show container states
+
+  --direct                       Use the SSH preview port for this command
+  --https                        Use the Caddy HTTPS configuration for this command
+USAGE
+}
+
+compose_run() {
+  "${compose[@]}" "$@"
+}
+
+config_check() {
+  if ! $external && ! has_value OMNIDOCS_POSTGRES_PASSWORD; then
+    printf '%s\n' 'Set the bundled database password with ./omnidocs setup.' >&2
+    return 2
+  fi
+  compose_run config --quiet || return $?
+  local webhook otp
+  webhook="$(compose_env_value OMNIDOCS_MAIL_WEBHOOK "${compose[@]}")" || webhook=''
+  if { ! $direct || [[ -n "$webhook" ]]; } && [[ ! "$webhook" =~ ^https://[^[:space:]]+$ ]]; then
+    printf '%s\n' 'OMNIDOCS_MAIL_WEBHOOK must use HTTPS. Run ./omnidocs setup.' >&2
+    return 2
+  fi
+  if ! $direct; then
+    otp="$(compose_env_value OMNIDOCS_ADMIN_TOTP_SECRET "${compose[@]}")" || otp=''
+    if [[ -n "$otp" && ! "$otp" =~ ^[A-Z2-7]{32}$ ]]; then
+      printf '%s\n' 'The authenticator recovery key must have 32 Base32 characters (A–Z and 2–7).' >&2
+      return 2
+    fi
+  fi
+}
+
+running() {
+  [[ -n "$(compose_run ps --status running -q "$1")" ]]
+}
+
+maintenance_lock() {
+  if ! mkdir .omnidocs-maintenance 2>/dev/null; then
+    printf '%s\n' 'Another OmniDocs maintenance command is in progress.' >&2
+    exit 2
+  fi
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+resume_backend=false
+stop_database=false
+incomplete_backup=
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ -n "$incomplete_backup" ]]; then rm -rf -- "$incomplete_backup"; fi
+  if $resume_backend; then
+    compose_run start backend >&2 || status=1
+  fi
+  if $stop_database; then
+    compose_run stop database >&2 || status=1
+  fi
+  rmdir .omnidocs-maintenance || true
+  exit "$status"
+}
+
+prepare_backup() {
+  if ! $external && ! running database; then
+    stop_database=true
+    compose_run up -d --no-build --wait database >&2
+  fi
+  if running backend; then
+    resume_backend=true
+    compose_run stop backend >&2
+  fi
+}
+
+workspace_command() {
+  compose_run run --rm --no-deps -T --entrypoint sh backend -ceu "$1"
+}
+
+database_command() {
+  local tool="$1"
+  shift
+  if $external; then
+    if [[ "$tool" == pg_restore && "${1:-}" == --list ]]; then
+      compose_run run --rm --no-deps -T --entrypoint pg_restore database-tools "$@"
+    else
+      compose_run run --rm --no-deps -T --entrypoint sh database-tools -ceu \
+        'exec "$@" --dbname="$DATABASE_URL"' db-tools "$tool" "$@"
+    fi
+  elif [[ "$tool" == pg_restore && "${1:-}" == --list ]]; then
+    compose_run exec -T database "$tool" "$@"
+  else
+    compose_run exec -T database "$tool" -U omnidocs -d omnidocs "$@"
+  fi
+}
+
+backup() {
+  local destination
+  mkdir -p -- "$backup_root"
+  destination="$(mktemp -d "$backup_root/omnidocs-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
+  incomplete_backup="$destination"
+  database_command pg_dump -Fc > "$destination/database.dump"
+  workspace_command '
+    cd /data
+    if [ -d workspaces ]; then
+      tar -czf - workspaces
+    else
+      tar -czf - -T /dev/null
+    fi
+  ' > "$destination/workspaces.tar.gz"
+  (cd "$destination" && sha256sum database.dump workspaces.tar.gz > SHA256SUMS)
+  incomplete_backup=
+  backup_path="$destination"
+  printf 'Backup saved to %s\n' "$destination"
+}
+
+restore_workspaces() {
+  workspace_command '
+    cd /data
+    stage=.omnidocs-restore
+    mkdir "$stage"
+    trap '"'"'if [ -d "$stage/previous" ] && [ ! -e workspaces ]; then mv "$stage/previous" workspaces; fi'"'"' EXIT
+    mkdir -p "$stage/incoming/workspaces"
+    tar -xzf - -C "$stage/incoming"
+    if [ -d workspaces ]; then mv workspaces "$stage/previous"; fi
+    mv "$stage/incoming/workspaces" workspaces
+  '
+}
+
+restore() {
+  local source="${1:-}" answer
+  if [[ -z "$source" ]]; then usage >&2; return 2; fi
+  if [[ "$source" != /* ]]; then source="$caller_directory/$source"; fi
+  (cd "$source" && sha256sum database.dump workspaces.tar.gz | cmp SHA256SUMS -)
+  (cd "$source" && test -s database.dump && tar -tzf workspaces.tar.gz >/dev/null)
+  printf 'Replace the current database and workspaces with this backup? Type RESTORE to continue: ' >&2
+  IFS= read -r answer
+  [[ "$answer" == RESTORE ]] || return 2
+
+  maintenance_lock
+  prepare_backup
+  database_command pg_restore --list < "$source/database.dump" >/dev/null
+  backup
+
+  local was_running="$resume_backend"
+  # Keep the backend stopped if a restore fails and the state needs inspecting.
+  resume_backend=false
+  restore_workspaces < "$source/workspaces.tar.gz"
+  if ! database_command pg_restore --clean --if-exists \
+    --no-owner --no-privileges --single-transaction < "$source/database.dump"; then
+    workspace_command '
+      cd /data
+      mv workspaces .omnidocs-restore/failed
+      if [ -d .omnidocs-restore/previous ]; then mv .omnidocs-restore/previous workspaces; fi
+      rm -rf .omnidocs-restore
+    '
+    resume_backend="$was_running"
+    printf 'Restore rolled back. Safety backup: %s\n' "$backup_path" >&2
+    return 1
+  fi
+  workspace_command 'rm -rf /data/.omnidocs-restore'
+  resume_backend="$was_running"
+  printf 'Restore complete. Safety backup: %s\n' "$backup_path"
+}
+
+admin_command() {
+  compose_run exec -T backend node --import tsx server/admin-command.ts "$@"
+}
+
+admin() {
+  case "${1:-}" in
+    status) admin_command status;;
+    password) printf '%s\n' 'Use ./omnidocs admin rotate-password to set a new password.' >&2; return 2;;
+    otp-key) printf '%s\n' 'Use Admin → Settings to enroll, or ./omnidocs admin rotate-otp to recover access.' >&2; return 2;;
+    rotate-otp)
+      maintenance_lock
+      admin_command rotate-otp
+      ;;
+    rotate-password)
+      maintenance_lock
+      local password confirmation
+      if [[ -t 0 ]]; then
+        IFS= read -r -s -p 'New administrator password: ' password
+        printf '\n' >&2
+        IFS= read -r -s -p 'Confirm new administrator password: ' confirmation
+        printf '\n' >&2
+        [[ "$password" == "$confirmation" ]] || { printf '%s\n' 'Passwords do not match.' >&2; return 2; }
+      else
+        IFS= read -r password || [[ -n "$password" ]]
+      fi
+      if ! admin_password_valid "$password"; then printf '%s\n' 'Use a password with 16–128 characters.' >&2; return 2; fi
+      printf '%s' "$password" | admin_command rotate-password
+      ;;
+    *) usage >&2; return 2;;
+  esac
+}
+
+stage_legacy_admin_password() {
+  local password verifier
+  password="$(compose_admin_password "${compose[@]}")" || return 0
+  [[ -n "$password" ]] || return 0
+  if ! admin_password_valid "$password"; then printf '%s\n' 'The legacy administrator password is invalid. Run ./omnidocs setup.' >&2; return 2; fi
+  verifier="$(printf '%s' "$password" | hash_admin_password)" || return $?
+  if [[ ! -f .env ]]; then touch .env; fi
+  append_value OMNIDOCS_ADMIN_PASSWORD_HASH "$verifier"
+  append_value OMNIDOCS_ADMIN_PASSWORD ''
+}
+
+start() {
+  local build_flag="$1" status container
+  config_check
+  stage_legacy_admin_password
+  if $direct; then compose_run stop frontend; fi
+  if compose_run up -d "$build_flag" --wait "${services[@]}"; then
+    if [[ -f .env ]] && { has_value OMNIDOCS_ADMIN_PASSWORD_HASH || has_value OMNIDOCS_ADMIN_TOTP_SECRET; }; then
+      admin_command status >/dev/null || return $?
+      append_value OMNIDOCS_ADMIN_PASSWORD_HASH ''
+      append_value OMNIDOCS_ADMIN_TOTP_SECRET ''
+      compose_run up -d --no-build --no-deps --wait backend
+    fi
+    return 0
+  else
+    status=$?
+  fi
+  compose_run ps -a >&2 || true
+  compose_run logs --tail=60 backend >&2 || true
+  container="$(compose_run ps -a -q backend)" || container=
+  if [[ -n "$container" ]]; then
+    docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}{{printf "exit %d: %s\n" .ExitCode .Output}}{{end}}{{end}}' "$container" >&2 || true
+  fi
+  return "$status"
+}
+
+command="${1:-help}"
+if (( $# )); then shift; fi
+case "$command" in
+  help|-h|--help) usage;;
+  setup) maintenance_lock; OMNIDOCS_ACCESS_OVERRIDE="$access_override" bash scripts/setup-compose.sh;;
+  config-check) config_check;;
+  run) maintenance_lock; start --no-build;;
+  stop)
+    maintenance_lock
+    if $external; then compose_run stop frontend backend
+    else compose_run stop frontend backend database; fi
+    ;;
+  backup) maintenance_lock; prepare_backup; backup;;
+  update) maintenance_lock; start --build;;
+  restore) restore "$@";;
+  admin) admin "$@";;
+  logs) compose_run logs --tail=100 "$@";;
+  status) compose_run ps -a;;
+  *) usage >&2; exit 2;;
+esac
