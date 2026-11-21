@@ -15,7 +15,7 @@ type AccessData={members:{id:string;email:string;role:string;scopeId:string;scop
 const currentRoute=()=>location.hash.replace(/^#\/?/,'').split('/');
 async function api(url:string,body?:unknown,csrf?:string,method=body===undefined?'GET':'POST',extraHeaders?:Record<string,string>){
  const response=await fetch(url,{method,headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),...(csrf?{'x-omnidocs-token':csrf}:{}),...extraHeaders},...(body===undefined?{}:{body:JSON.stringify(body)})});
- const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed.');return data;
+ const data=await response.json();if(!response.ok)throw Object.assign(new Error(data.error||'Request failed.'),{captchaRequired:data.captchaRequired===true});return data;
 }
 export function StudioRoot(){
  const [connectionError,setConnectionError]=useState('');
@@ -102,9 +102,13 @@ function AuthScreen({route,error:external,onComplete}:{route:string[];error:stri
  const mode=route[0];
  const verify=mode==='verify',reset=mode==='reset',register=mode==='register',forgot=mode==='forgot';
  const [registration,setRegistration]=useState<RegistrationMode>();
+ const [zitadelEnabled,setZitadelEnabled]=useState(false);
+ const login=!verify&&!reset&&!register&&!forgot;
  const automatic=register&&registration==='automatic';
- const captchaRequired=!verify&&!reset&&!forgot;
- const captcha=useCaptcha(captchaRequired?(register?'register':'login'):null);
+ const [captchaPurpose,setCaptchaPurpose]=useState<'login'|'register'|null>(null);
+ const purpose=register?'register':login?'login':null;
+ const captchaRequired=!!purpose&&purpose===captchaPurpose;
+ const captcha=useCaptcha(captchaRequired?purpose:null);
  const showEmail=!verify&&!reset;
  const isNewPassword=reset||verify||automatic;
  const title=verify?'Activate your account':reset?'Set a new password':register?'Create your account':forgot?'Reset your password':'Sign in';
@@ -114,12 +118,12 @@ function AuthScreen({route,error:external,onComplete}:{route:string[];error:stri
     :forgot?'Enter your account email to request a reset link.':'Open your organizations and workspaces.';
  useEffect(()=>{setPassword('');setError('');},[mode]);
  useEffect(()=>{
-  if(!register)return;
+  if(!register&&!login)return;
   let active=true;setRegistration(undefined);
-  void api('/api/auth/registration').then(data=>{if(active)setRegistration(data.mode);})
-   .catch(error=>{if(active)setError(error.message);});
+  void api('/api/auth/registration').then(data=>{if(active){setRegistration(data.mode);setZitadelEnabled(data.zitadelEnabled===true);}})
+   .catch(error=>{if(active&&register)setError(error.message);});
   return ()=>{active=false;};
- },[register]);
+ },[register,login]);
 
  async function submit(event:FormEvent<HTMLFormElement>){
   event.preventDefault();if(busy||captchaRequired&&!captcha.ready||register&&!registration)return;
@@ -134,11 +138,17 @@ function AuthScreen({route,error:external,onComplete}:{route:string[];error:stri
    }else if(forgot){
     const result=await api('/api/auth/forgot',{email});setMessage(result.message);
    }else{await api('/api/auth/login',{email,password},undefined,'POST',captcha.headers);await onComplete();}
-  }catch(err){setError(err instanceof Error?err.message:'Cannot continue.');}
-  finally{if(captchaRequired)captcha.reload();setBusy(false);}
+   if(purpose)setCaptchaPurpose(null);
+  }catch(err){
+   setError(err instanceof Error?err.message:'Cannot continue.');
+   if(purpose&&err instanceof Error&&'captchaRequired' in err&&err.captchaRequired){
+    setCaptchaPurpose(purpose);captcha.reload();
+   }
+  }finally{setBusy(false);}
  }
 
  return <AccountFrame title={title} description={description}>
+  {login&&route[1]==='zitadel-error'&&<p className="editor-error" role="alert">SSO login failed. Use the verified email on your OmniDocs account or contact your administrator.</p>}
   <form className="editor-form account-form" onSubmit={event=>void submit(event)}>
    {register&&<label>Name<input required autoComplete="name" maxLength={160} value={name} onChange={event=>setName(event.target.value)}/></label>}
    {showEmail&&<label>Email<input required type="email" autoComplete="email" maxLength={254} value={email} onChange={event=>setEmail(event.target.value)}/></label>}
@@ -148,6 +158,7 @@ function AuthScreen({route,error:external,onComplete}:{route:string[];error:stri
    {(error||external)&&<p className="editor-error" role="alert">{error||external}</p>}
    {message&&<p role="status">{message}</p>}
    <button className="button primary" disabled={busy||captchaRequired&&!captcha.ready||register&&!registration}>{busy?'Please wait…':verify?'Activate account':reset?'Set new password':register?registration==='email'?'Send activation link':registration==='manual'?'Request approval':'Create account':forgot?'Send reset email':'Sign in'}</button>
+   {login&&zitadelEnabled&&<a className="button secondary account-sso" href="/api/auth/zitadel/start">Login with SSO</a>}
   </form>
   {!verify&&!reset&&<nav className="account-links" aria-label="Account actions">
    {register||forgot?<a href="#/login" onClick={()=>setMessage('')}>Back to sign in</a>:<>

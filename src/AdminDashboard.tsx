@@ -104,10 +104,11 @@ const registrationOptions={
 };
 function RegistrationPanel({revision,onExpired,busy,mutate}:{revision:number;onExpired:()=>Promise<void>;busy:boolean;mutate:Mutation}){
  const state=useAdminData<RegistrationSettings>('registration',revision,onExpired);
+ const zitadel=useAdminData<{issuer:string;clientId:string;enabled:boolean;callbackUrl:string}>('zitadel',revision,onExpired);
  const [selected,setSelected]=useState<RegistrationMode>();
  const active=selected??state.data?.mode;
  return <>
-  <DashboardTitle title="Settings" description="Account registration and activation"/>
+  <DashboardTitle title="Settings" description="Account registration and sign-in"/>
   <DataFeedback state={state}/>
   {state.data&&<form className="admin-list admin-management-card editor-form" onSubmit={event=>{
    event.preventDefault();void mutate('registration',{mode:active}).then(()=>setSelected(undefined)).catch(()=>{});
@@ -122,6 +123,28 @@ function RegistrationPanel({revision,onExpired,busy,mutate}:{revision:number;onE
    </div>
    <button className="button primary" disabled={busy||active===state.data.mode}>Save settings</button>
   </form>}
+  <section className="admin-list admin-management-card editor-form">
+   <h2>ZITADEL SSO</h2>
+   <DataFeedback state={zitadel}/>
+   {zitadel.data&&<>
+    <form className="editor-form" onSubmit={event=>{
+     event.preventDefault();
+     const fields=new FormData(event.currentTarget);
+     void mutate('zitadel/config',{issuer:fields.get('issuer'),clientId:fields.get('clientId')}).catch(()=>{});
+    }}>
+     <label>Issuer URL<input name="issuer" type="url" required maxLength={2048} defaultValue={zitadel.data.issuer} placeholder="https://example.zitadel.cloud"/></label>
+     <label>Client ID<input name="clientId" required maxLength={255} defaultValue={zitadel.data.clientId}/></label>
+     <label>Redirect URI<input readOnly value={zitadel.data.callbackUrl} onFocus={event=>event.target.select()}/></label>
+     {zitadel.data.enabled&&<p>Changing the issuer or Client ID disables SSO until you enable it again.</p>}
+     <button className="button primary" disabled={busy}>Save ZITADEL settings</button>
+    </form>
+    <p>{zitadel.data.enabled?'Enabled':'Disabled'}</p>
+    <button type="button" className="button secondary" disabled={busy||!zitadel.data.clientId}
+     onClick={()=>void mutate('zitadel',{enabled:!zitadel.data!.enabled}).catch(()=>{})}>
+     {zitadel.data.enabled?'Disable ZITADEL SSO':'Enable ZITADEL SSO'}
+    </button>
+   </>}
+  </section>
  </>;
 }
 

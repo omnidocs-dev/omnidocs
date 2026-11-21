@@ -4,7 +4,7 @@ import {AccountFrame} from './AccountFrame';
 import {PasswordField,SixDigitField} from './SignInFields';
 import {AuthenticatorSettings,type AuthenticatorSession} from './AuthenticatorSettings';
 import {SignInCaptcha,useCaptcha} from './SignInCaptcha';
-import {adminRequest} from './admin-client';
+import {AdminRequestError,adminRequest} from './admin-client';
 import {AdminDashboard} from './AdminDashboard';
 import brand from './assets/brand/omnidocs-mark.svg';
 
@@ -15,7 +15,8 @@ export function AdminPanel() {
  const [busy,setBusy]=useState(false);
  const [username,setUsername]=useState(''),[password,setPassword]=useState('');
  const [code,setCode]=useState('');
- const captcha=useCaptcha(session?.enabled&&!session.username?'admin':null);
+ const [captchaRequired,setCaptchaRequired]=useState(false);
+ const captcha=useCaptcha(captchaRequired&&session?.enabled&&!session.username?'admin':null);
  const checkSession=useCallback(()=>{
   setError('');
   return adminRequest<Session>('me').then(setSession).catch(error=>setError(error.message));
@@ -24,12 +25,16 @@ export function AdminPanel() {
 
  async function signIn(event:FormEvent<HTMLFormElement>) {
   event.preventDefault();
-  if(busy||!captcha.ready)return;
+  if(busy||captchaRequired&&!captcha.ready)return;
   setBusy(true);setError('');
   try{
    const result=await adminRequest<Omit<Session,'enabled'>>('login',{username,password,...(session?.mfaRequired?{code}:{})},undefined,captcha.headers);
    setSession({...result,enabled:true});
-  }catch(error){setError(error instanceof Error?error.message:'Sign-in failed.');captcha.reload();}
+   setCaptchaRequired(false);
+  }catch(error){
+   setError(error instanceof Error?error.message:'Sign-in failed.');
+   if(error instanceof AdminRequestError&&error.captchaRequired){setCaptchaRequired(true);captcha.reload();}
+  }
   finally{setPassword('');setCode('');setBusy(false);}
  }
 
@@ -65,9 +70,9 @@ export function AdminPanel() {
    <label>Username<input required autoComplete="username" maxLength={64} value={username} onChange={event=>setUsername(event.target.value)}/></label>
    <PasswordField value={password} onChange={setPassword}/>
    {session.mfaRequired&&<SixDigitField label="Authentication code" value={code} onChange={setCode} autoComplete="one-time-code"/>}
-   <SignInCaptcha {...captcha}/>
+   {captchaRequired&&<SignInCaptcha {...captcha}/>}
    {error&&<p className="editor-error" role="alert">{error}</p>}
-   <button className="button primary" disabled={busy||!captcha.ready}>{busy?'Signing in…':'Sign in to admin'}</button>
+   <button className="button primary" disabled={busy||captchaRequired&&!captcha.ready}>{busy?'Signing in…':'Sign in to admin'}</button>
   </form>}
  </AccountFrame>;
 }

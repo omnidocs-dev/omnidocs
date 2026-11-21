@@ -1,4 +1,6 @@
-import {consumeCaptcha,createCaptcha} from './captcha.ts';
+import * as oidc from 'openid-client';
+import {discoverZitadel,readZitadelSettings,zitadelCallback} from './zitadel.ts';
+import {consumeCaptcha,createCaptcha,reserveCaptchaFreeAttempt} from './captcha.ts';
 import {issueAccountLink,registrationMode} from './registration.ts';
 import {adminEmailDomain,bootstrapAdmin,readAdminAccount,registerAdminRoutes,type AdminCredentials} from './admin.ts';
 import {initializeImportedHistory, publishedFiles, registerHistoryRoutes, reviewRequired, savePublished} from './history.ts';
@@ -76,9 +78,11 @@ export async function createServiceApp(options:ServiceOptions){
   }
  }
  function route(method:'get'|'post'|'delete',url:string,handler:(ctx:Context)=>Promise<Reply>,csrf=true,prepare?:(req:express.Request)=>Promise<unknown>){
-  app[method](url,async(req,res)=>{try{
+  const captchaPurpose=url==='/api/auth/login'?'login':url==='/api/auth/register'?'register':url==='/admin/api/login'?'admin':undefined;
+  app[method](url,async(req,res)=>{
+   let captchaRequired=false;
+  try{
    const client=req.ip??'unknown';
-   const captchaPurpose=url==='/api/auth/login'?'login':url==='/api/auth/register'?'register':url==='/admin/api/login'?'admin':undefined;
    const captchaIssuer=url.endsWith('/captcha');
    if(method!=='get'){
     await db.transaction(sql=>rateLimit(sql,`write:${client}`,160),'independent');
@@ -90,10 +94,14 @@ export async function createServiceApp(options:ServiceOptions){
      if(captchaPurpose==='admin')await db.transaction(sql=>rateLimit(sql,'auth:admin:global',30),'independent');
     }
    }
+   const freeAttempt=captchaPurpose?await db.transaction(sql=>reserveCaptchaFreeAttempt(sql,captchaPurpose,client),'independent'):undefined;
    if(captchaPurpose){
+    captchaRequired=true;
     const id=req.get('x-omnidocs-captcha-id')??'',answer=req.get('x-omnidocs-captcha-answer')??'';
-    const expected=/^[A-Za-z0-9_-]{43}$/.test(id)?await db.transaction(sql=>consumeCaptcha(sql,captchaPurpose,client,id),'independent'):undefined;
-    if(!expected||!/^\d{6}$/.test(answer)||digest(id+answer)!==expected)fail(400,'Enter the digits from a new CAPTCHA and try again.');
+    if(!freeAttempt||id||answer){
+     const expected=/^[A-Za-z0-9_-]{43}$/.test(id)?await db.transaction(sql=>consumeCaptcha(sql,captchaPurpose,client,id),'independent'):undefined;
+     if(!expected||!/^\d{6}$/.test(answer)||digest(id+answer)!==expected)fail(400,'Enter the digits from a new CAPTCHA and try again.');
+    }
    }
    if(captchaPurpose==='login'&&typeof req.body?.email==='string'){
     const account=email.parse(req.body.email);
@@ -106,7 +114,9 @@ export async function createServiceApp(options:ServiceOptions){
    const reply=await db.transaction(async sql=>{
     const identity=await identify(sql,req);
     if(method!=='get'&&csrf&&(!identity.session||req.get('x-omnidocs-token')!==identity.session.csrf))fail(403,'Invalid session request token.');
-    return handler({sql,req,...identity,prepared});
+    const reply=await handler({sql,req,...identity,prepared});
+    if(freeAttempt)await sql.run('DELETE FROM rate_limits WHERE bucket=? AND expires=?',[freeAttempt.bucket,freeAttempt.expires]);
+    return reply;
    },mode);
    if(reply.cookie)res.setHeader('Set-Cookie',reply.cookie);
    if(url==='/admin/api/login')logSecurity('admin.login_succeeded',url,200);
@@ -117,7 +127,7 @@ export async function createServiceApp(options:ServiceOptions){
    if(status===500)logSecurity('api.unexpected_error',url,status);
    if(url==='/admin/api/login'&&status===401)logSecurity('admin.login_denied',url,status);
    if(status===429)res.setHeader('Retry-After',url.endsWith('/captcha')||url==='/api/share/:token/workspace'?'60':'900');
-   res.status(status).json({error:error instanceof ServiceError||error instanceof ConflictError?error.message:error instanceof z.ZodError?error.issues.map(i=>i.message).join('; '):'The request could not be completed.'});
+   res.status(status).json({...(captchaRequired&&status<500&&status!==429?{captchaRequired:true}:{}),error:error instanceof ServiceError||error instanceof ConflictError?error.message:error instanceof z.ZodError?error.issues.map(i=>i.message).join('; '):'The request could not be completed.'});
   }});
  }
  try{await bootstrapAdmin(db,options.admin);await registerAdminRoutes(route,secure,origin,localAccess,emailAvailable,db);}catch(error){await db.close();throw error;}
@@ -125,7 +135,10 @@ export async function createServiceApp(options:ServiceOptions){
   await sql.all('SELECT 1');
   return {body:{status:'ok'}};
  });
- route('get','/api/auth/registration',async({sql})=>({body:{mode:await registrationMode(sql,localAccess,emailAvailable)}}));
+ route('get','/api/auth/registration',async({sql})=>{
+  const {config,generation}=await readZitadelSettings(sql);
+  return {body:{mode:await registrationMode(sql,localAccess,emailAvailable),zitadelEnabled:!!(config&&generation)}};
+ });
  route('post','/api/auth/captcha',async({sql,req})=>{
   const {purpose}=z.object({purpose:z.enum(['login','register'])}).strict().parse(req.body);
   return {body:await createCaptcha(sql,purpose,req.ip??'unknown')};
@@ -141,6 +154,79 @@ export async function createServiceApp(options:ServiceOptions){
  const activationInput=z.object({token:z.string().min(32).max(100),password}).strict();
  const accountForLogin=(sql:SQL,address:string)=>sql.all<User&{password:string;suspended:number}>(
   'SELECT u.id,u.email,u.name,u.verified,u.password, CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END AS suspended FROM users u LEFT JOIN suspended_users b ON b.user_id=u.id WHERE u.email=? AND u.platform_role<>\'admin\' AND (?=1 OR NOT EXISTS (SELECT 1 FROM local_accounts l WHERE l.user_id=u.id))',[address,Number(localAccess)]);
+ const flowCookie=secure?'__Host-omnidocs_zitadel':'omnidocs_zitadel';
+ const flowCookieOptions={httpOnly:true,sameSite:'lax' as const,secure,path:'/'};
+ const ssoFailure='/#/login/zitadel-error';
+ app.get('/api/auth/zitadel/start',async(req,res)=>{
+  try{
+   await db.transaction(sql=>rateLimit(sql,`zitadel:start:${req.ip}`,30),'independent');
+   const {config:provider,generation}=await db.transaction(readZitadelSettings,'read');
+   if(!provider||!generation)return void res.redirect(303,ssoFailure);
+   const config=await discoverZitadel(provider);
+   const state=oidc.randomState(),nonce=oidc.randomNonce(),verifier=oidc.randomPKCECodeVerifier();
+   const authorization=oidc.buildAuthorizationUrl(config,{
+    redirect_uri:origin+zitadelCallback,scope:'openid email',state,nonce,
+    code_challenge:await oidc.calculatePKCECodeChallenge(verifier),code_challenge_method:'S256',
+   });
+   await db.transaction(async sql=>{
+    if((await readZitadelSettings(sql)).generation!==generation)fail(403,'ZITADEL SSO is unavailable.');
+    await sql.run('DELETE FROM zitadel_flows WHERE expires<=?',[stamp()]);
+    await sql.run('INSERT INTO zitadel_flows(hash,verifier,nonce,generation,expires) VALUES(?,?,?,?,?)',
+     [digest(state),verifier,nonce,generation,stamp()+600_000]);
+   },'global');
+   res.cookie(flowCookie,state,{...flowCookieOptions,maxAge:600_000});
+   res.redirect(303,authorization.href);
+  }catch{res.redirect(303,ssoFailure);}
+ });
+ app.get(zitadelCallback,async(req,res)=>{
+  const state=(req.headers.cookie??'').split(';').map(value=>value.trim()).find(value=>value.startsWith(flowCookie+'='))?.slice(flowCookie.length+1);
+  const callback=new URL(origin+zitadelCallback);
+  callback.search=req.originalUrl.slice(req.path.length);
+  if(!state||callback.searchParams.getAll('state').length!==1||callback.searchParams.get('state')!==state){
+   res.redirect(303,ssoFailure);return;
+  }
+  res.clearCookie(flowCookie,flowCookieOptions);
+  try{
+   const attempt=await db.transaction(async sql=>{
+    const [pending]=await sql.all<{verifier:string;nonce:string;generation:string}>('SELECT verifier,nonce,generation FROM zitadel_flows WHERE hash=? AND expires>?',[digest(state),stamp()]);
+    const {config:provider,generation}=await readZitadelSettings(sql);
+    if(!pending||!provider||pending.generation!==generation)return undefined;
+    await sql.run('DELETE FROM zitadel_flows WHERE hash=?',[digest(state)]);
+    return {flow:pending,provider};
+   },'global');
+   if(!attempt)return void res.redirect(303,ssoFailure);
+   const {flow,provider}=attempt;
+   const config=await discoverZitadel(provider);
+   const tokens=await oidc.authorizationCodeGrant(config,callback,{
+    expectedState:state,expectedNonce:flow.nonce,pkceCodeVerifier:flow.verifier,
+   });
+   const claims=tokens.claims();
+   if(!claims?.sub)return void res.redirect(303,ssoFailure);
+   const profile=await oidc.fetchUserInfo(config,tokens.access_token,claims.sub);
+   const address=email.safeParse(profile.email);
+   if(profile.email_verified!==true||!address.success)return void res.redirect(303,ssoFailure);
+   const token=await db.transaction(async sql=>{
+    if(flow.generation!==(await readZitadelSettings(sql)).generation)return undefined;
+    const [user]=await accountForLogin(sql,address.data);
+    if(!user?.verified||user.suspended)return undefined;
+    const identities=await sql.all<{subject:string;user_id:string}>(
+     'SELECT subject,user_id FROM zitadel_identities WHERE issuer=? AND (user_id=? OR subject=?)',
+     [provider.issuer,user.id,claims.sub]);
+    if(identities.some(identity=>identity.subject!==claims.sub||identity.user_id!==user.id))return undefined;
+    if(!identities.length)await sql.run('INSERT INTO zitadel_identities(issuer,subject,user_id) VALUES(?,?,?)',[provider.issuer,claims.sub,user.id]);
+    return createMemberSession(sql,user,'account.zitadel_sign_in');
+   },'global');
+   if(!token)return void res.redirect(303,ssoFailure);
+   res.append('Set-Cookie',sessionCookie(token.token));
+   res.redirect(303,'/');
+  }catch{res.redirect(303,ssoFailure);}
+ });
+ async function createMemberSession(sql:SQL,user:User,action='account.sign_in'){
+  const token=secret(),csrf=secret();
+  await sql.run('INSERT INTO sessions(hash,user_id,csrf,expires) VALUES(?,?,?,?)',[digest(token),user.id,csrf,stamp()+604800_000]);
+  await audit(sql,user,action);
+  return {token,csrf};
+ }
  const validToken=(sql:SQL,token:string,purpose:'verify'|'reset')=>sql.all<{user_id:string}>(
   'SELECT user_id FROM auth_tokens WHERE hash=? AND purpose=? AND expires>?',[digest(token),purpose,stamp()]);
  const clearAccountLinks=async(sql:SQL,userId:string)=>{
@@ -184,9 +270,7 @@ export async function createServiceApp(options:ServiceOptions){
   const {email:address}=loginInput.parse(req.body);
   const [user]=await accountForLogin(sql,address);
   if(!user||!user.verified||user.suspended||user.password!==prepared)fail(401,'Email or password is incorrect.');
-  const token=secret(),csrf=secret();
-  await sql.run('INSERT INTO sessions(hash,user_id,csrf,expires) VALUES(?,?,?,?)',[digest(token),user.id,csrf,stamp()+604800_000]);
-  await audit(sql,user,'account.sign_in');
+  const {token,csrf}=await createMemberSession(sql,user);
   return{cookie:sessionCookie(token),body:{user:{id:user.id,email:user.email,name:user.name,verified:true},csrf}};
  },false,async(req)=>{
   const input=loginInput.parse(req.body);

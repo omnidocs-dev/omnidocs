@@ -1,5 +1,5 @@
 import test from 'node:test';
-import {createHmac} from 'node:crypto';
+import {createHash,createHmac,generateKeyPairSync,sign} from 'node:crypto';
 import {gzipSync} from 'node:zlib';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
@@ -37,7 +37,7 @@ async function request(app:Express,method:string,url:string,body?:unknown,sessio
  if(compress)req.headers['content-encoding']='gzip';
  const res=new ServerResponse(req);res.assignSocket(socket as Socket);
  await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(`${url}: request timed out`)),10000);res.on('finish',()=>{clearTimeout(timer);resolve();});res.on('error',reject);app(req,res);if(wireBody)req.push(wireBody);req.push(null);});socket.destroy();
- return{status:res.statusCode,data:JSON.parse(output.split('\r\n\r\n').slice(1).join('\r\n\r\n')),cookie:String(res.getHeader('set-cookie')??'').split(';')[0],setCookie:String(res.getHeader('set-cookie')??''),headers:res.getHeaders()};
+ return{status:res.statusCode,data:String(res.getHeader('content-type')).includes('application/json')?JSON.parse(output.split('\r\n\r\n').slice(1).join('\r\n\r\n')):undefined,cookie:String(res.getHeader('set-cookie')??'').split(';')[0],setCookie:String(res.getHeader('set-cookie')??''),headers:res.getHeaders()};
 }
 async function fixture(t:{after:(fn:()=>Promise<void>)=>void},admin?:ServiceOptions['admin']){const root=await mkdtemp(path.join(tmpdir(),'omnidocs-service-')),mail:Mail[]=[];const service=await createServiceApp({root,origin,admin,mail:async message=>{mail.push(message);}});t.after(async()=>{await service.close();await rm(root,{recursive:true,force:true});});
  const call=(method:string,url:string,body?:unknown,session?:Login)=>request(service.app,method,url,body,session);
@@ -162,6 +162,18 @@ test('hosted API rejects compressed JSON for ordinary requests and workspace imp
  }
 });
 
+test('successful registration and password sign-ins can start without CAPTCHA',async t=>{
+ const credentials={username:'admin',password:'Separate-Admin-Password-123'};
+ const f=await fixture(t,credentials);
+ const post=(url:string,body:unknown)=>request(f.app,'POST',url,body,undefined,origin,'127.0.0.1',undefined,null);
+ const member=await f.user('first-attempt@example.com');
+ assert(member.cookie);
+ assert.equal((await post('/api/auth/register',{email:'new-member@example.com',name:'New member'})).status,202);
+ assert.equal((await post('/api/auth/login',{email:'first-attempt@example.com',password})).status,200);
+ assert.equal((await post('/api/auth/login',{email:'first-attempt@example.com',password})).status,200);
+ assert.equal((await post('/admin/api/login',credentials)).status,200);
+});
+
 test('CAPTCHA is issued as an image and is bound to one submission, action and client',async t=>{
  const f=await fixture(t,{username:'admin',password:'Separate-Admin-Password-123'});
  const challenge=await f.call('POST','/api/auth/captcha',{purpose:'login'});
@@ -170,7 +182,12 @@ test('CAPTCHA is issued as an image and is bound to one submission, action and c
  assert.match(challenge.data.image,/^data:image\/png;base64,iVBORw0KGgo/);
  const body={email:'person@example.com',password};
  const login=(captcha:TestCaptcha|null,client='127.0.0.1')=>request(f.app,'POST','/api/auth/login',body,undefined,origin,client,undefined,captcha);
- assert.equal((await login(null)).status,400);
+ const failed=await login(null);
+ assert.equal(failed.status,401);
+ assert.equal(failed.data.captchaRequired,true);
+ const retry=await login(null);
+ assert.equal(retry.status,400);
+ assert.equal(retry.data.captchaRequired,true);
  assert.equal((await login(await seedCaptcha(f.app,'register'))).status,400);
  assert.equal((await login(await seedCaptcha(f.app,'login','127.0.0.1',Date.now()-1))).status,400);
  const wrong=await seedCaptcha(f.app,'login');
@@ -180,11 +197,91 @@ test('CAPTCHA is issued as an image and is bound to one submission, action and c
  assert.equal((await login(once,'127.0.0.2')).status,400);
  assert.equal((await login(once)).status,401);
  assert.equal((await login(once)).status,400);
- assert.equal((await request(f.app,'POST','/admin/api/login',{username:'admin',password:'Separate-Admin-Password-123'},undefined,origin,'127.0.0.1',undefined,null)).status,400);
+ assert.equal((await request(f.app,'POST','/admin/api/login',{username:'admin',password:'wrong'},undefined,origin,'127.0.0.1',undefined,null)).status,401);
  for(let index=0;index<11;index++)assert.equal((await f.call('POST','/admin/api/login',{username:'admin',password:'wrong'})).status,401);
  const limited=await f.call('POST','/admin/api/login',{username:'admin',password:'wrong'});
  assert.equal(limited.status,429);
  assert.equal(limited.headers['retry-after'],'900');
+});
+
+test('ZITADEL sign-in validates the identity and honors the administrator toggle',async t=>{
+ const issuer='https://identity.example.test',clientId='omnidocs-test';
+ const credentials={username:'admin',password:'Separate-Admin-Password-123'};
+ const f=await fixture(t,credentials);
+ const member=await f.user('member@example.com');
+ const signed=await f.call('POST','/admin/api/login',credentials);
+ const admin={cookie:signed.cookie,csrf:signed.data.csrf};
+ const settings='/admin/api/zitadel',configuration=settings+'/config',start='/api/auth/zitadel/start',callback='/api/auth/zitadel/callback';
+ assert.deepEqual((await f.call('GET',settings,undefined,admin)).data,{issuer:'',clientId:'',enabled:false,callbackUrl:origin+callback});
+ assert.equal((await f.call('GET',start)).headers.location,'/#/login/zitadel-error');
+ assert.equal((await f.call('POST',settings,{enabled:true},member)).status,401);
+ assert.equal((await f.call('POST',settings,{enabled:true},{...admin,csrf:'wrong'})).status,403);
+ assert.equal((await f.call('POST',settings,{enabled:true},admin)).status,409);
+ assert.equal((await f.call('POST',configuration,{issuer,clientId},member)).status,401);
+ assert.equal((await f.call('POST',configuration,{issuer:'http://identity.example.test',clientId},admin)).status,422);
+ assert.equal((await f.call('POST',configuration,{issuer,clientId},admin)).status,200);
+ assert.deepEqual((await f.call('GET',settings,undefined,admin)).data,{issuer,clientId,enabled:false,callbackUrl:origin+callback});
+ assert.equal((await f.call('POST',settings,{enabled:true},admin)).status,200);
+ assert.equal((await f.call('GET','/api/auth/registration')).data.zitadelEnabled,true);
+
+ const {publicKey,privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+ let nonce='',challenge='',verified=true,subject='member-subject';
+ const encode=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString('base64url');
+ t.mock.method(globalThis,'fetch',async(input:URL|Request|string,init?:RequestInit)=>{
+  switch(String(input)){
+   case issuer+'/.well-known/openid-configuration':
+    return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',
+     jwks_uri:issuer+'/jwks',userinfo_endpoint:issuer+'/userinfo',id_token_signing_alg_values_supported:['RS256'],
+     code_challenge_methods_supported:['S256'],token_endpoint_auth_methods_supported:['none']});
+   case issuer+'/token': {
+    const body=new URLSearchParams(String(init?.body));
+    assert.equal(createHash('sha256').update(body.get('code_verifier')!).digest('base64url'),challenge);
+    assert.equal(body.get('redirect_uri'),origin+callback);
+    const now=Math.floor(Date.now()/1000);
+    const jwt=encode({alg:'RS256',kid:'test'})+'.'+encode({iss:issuer,sub:subject,aud:clientId,nonce,iat:now,exp:now+300});
+    return Response.json({access_token:'test-access-token',token_type:'Bearer',
+     id_token:jwt+'.'+sign('RSA-SHA256',Buffer.from(jwt),privateKey).toString('base64url')});
+   }
+   case issuer+'/jwks':
+    return Response.json({keys:[{...publicKey.export({format:'jwk'}),kid:'test',alg:'RS256',use:'sig'}]});
+   case issuer+'/userinfo':
+    return Response.json({sub:subject,email:'member@example.com',email_verified:verified});
+   default: throw new Error('Unexpected OIDC request');
+  }
+ });
+ async function begin(){
+  const response=await f.call('GET',start);
+  const url=new URL(String(response.headers.location));
+  assert.equal(url.origin+url.pathname,issuer+'/authorize');
+  nonce=url.searchParams.get('nonce')!;
+  challenge=url.searchParams.get('code_challenge')!;
+  const state=url.searchParams.get('state');
+  return {url:callback+'?code=test&state='+state,session:{cookie:response.cookie,csrf:''}};
+ }
+ const attempt=await begin();
+ assert.equal((await f.call('GET',attempt.url)).headers.location,'/#/login/zitadel-error');
+ const result=await f.call('GET',attempt.url,undefined,attempt.session);
+ assert.equal(result.headers.location,'/');
+ const sessionCookie=(result.headers['set-cookie'] as string[]).find(cookie=>cookie.startsWith('omnidocs_session='))!.split(';')[0];
+ assert.equal((await f.call('GET','/api/auth/me',undefined,{cookie:sessionCookie,csrf:''})).data.user.email,'member@example.com');
+ assert.equal((await f.call('GET',attempt.url,undefined,attempt.session)).headers.location,'/#/login/zitadel-error');
+ verified=false;
+ const unverified=await begin();
+ assert.equal((await f.call('GET',unverified.url,undefined,unverified.session)).headers.location,'/#/login/zitadel-error');
+ verified=true;
+ subject='different-subject';
+ const mismatched=await begin();
+ assert.equal((await f.call('GET',mismatched.url,undefined,mismatched.session)).headers.location,'/#/login/zitadel-error');
+ const pending=await begin();
+ assert.equal((await f.call('POST',settings,{enabled:false},admin)).status,200);
+ assert.equal((await f.call('GET','/api/auth/registration')).data.zitadelEnabled,false);
+ assert.equal((await f.call('GET',pending.url,undefined,pending.session)).headers.location,'/#/login/zitadel-error');
+ assert.equal((await f.call('POST',settings,{enabled:true},admin)).status,200);
+ const outdated=await begin();
+ assert.equal((await f.call('POST',configuration,{issuer,clientId:'replacement-client'},admin)).status,200);
+ assert.equal((await f.call('GET',outdated.url,undefined,outdated.session)).headers.location,'/#/login/zitadel-error');
+ assert.deepEqual((await f.call('GET',settings,undefined,admin)).data,
+  {issuer,clientId:'replacement-client',enabled:false,callbackUrl:origin+callback});
 });
 
 test('administrator controls registration and issues single-use manual activation links',async t=>{

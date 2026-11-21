@@ -20,6 +20,14 @@ For frontend development, use `npm run service:dev`, then open **http://127.0.0.
 
 The built HTML file is an offline workspace snapshot, not the hosted account system. Use the server URL for accounts and shared links.
 
+## Sign in with ZITADEL
+
+1. In the ZITADEL Console, open your project and create a **Web** application using the **PKCE** authentication method. Register the redirect URI shown in OmniDocs under **Admin → Settings → ZITADEL SSO**. For example, use `https://docs.example.com/api/auth/zitadel/callback` for a hosted service. For personal mode, use the exact address printed by the launcher, such as `http://127.0.0.1:4174/api/auth/zitadel/callback`, and enable Development Mode for that application in ZITADEL. Use the exact scheme, host, and port when opening OmniDocs.
+2. Under **Admin → Settings → ZITADEL SSO**, enter the ZITADEL instance's HTTPS origin and the application's Client ID. Click **Save ZITADEL settings**. OmniDocs saves these values in its database. Changing either value disables SSO until you enable it again.
+3. Open **Admin → Settings → ZITADEL SSO** and click **Enable ZITADEL SSO**. Open the member sign-in page and choose **Sign in with ZITADEL**. The server needs HTTPS access to your ZITADEL instance.
+
+SSO is disabled by default. Members first need an active, verified OmniDocs account with the same verified email in ZITADEL. The first successful sign-in binds that account to the ZITADEL identity. Use a ZITADEL instance whose email verification you trust. Administrators continue to use the separate `/admin/` sign-in. **Disable ZITADEL SSO** blocks new and in-progress SSO sign-ins. Existing OmniDocs sessions remain active until sign-out, expiration, or revocation in **Admin → Users**.
+
 ## Accounts and administrator access
 
 - Users can open `/#/login`, `/#/register` and `/#/forgot` on the service URL. Public registration creates a standard account.
@@ -32,7 +40,7 @@ The built HTML file is an offline workspace snapshot, not the hosted account sys
 
 Open **Admin → Settings** to choose how new accounts activate. **Email verification** sends a link through the configured transport. **Administrator approval** leaves each request pending until an administrator opens **Users**, selects the account, and clicks **Approve account**. Give the one-time link to the account owner so they can choose their password. **Automatic activation** is available for direct loopback deployments and lets users choose a password at registration. Accounts created this way must prove email ownership before they can sign in after moving the service to a public URL. In SSH preview mode, email delivery is optional. Without an email transport, use administrator approval or automatic activation.
 
-User registration and both sign-in forms use a self-hosted image CAPTCHA. Each challenge expires after three minutes and is single-use. User sign-in limits attempts by client IP, email and their combination. Administrator sign-in limits attempts both per IP and across the instance. Attempt limits are stored in the database and apply to all API clients.
+User registration and both password sign-in forms start without CAPTCHA. A failed attempt requires a self-hosted image CAPTCHA for retries from the same IP and form for up to 15 minutes. Each challenge expires after three minutes and is single-use. User sign-in limits attempts by client IP, email and their combination. Administrator sign-in limits attempts both per IP and across the instance. Attempt limits are stored in the database and apply to all API clients.
 
 To open the administrator panel directly, run the local launcher with `-- --admin`. Enter the credentials shown on first setup. The legacy `service:admin` launcher still accepts a custom initial password in an interactive terminal.
 

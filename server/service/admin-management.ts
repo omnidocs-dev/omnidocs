@@ -2,7 +2,8 @@ import {randomUUID} from 'node:crypto';
 import type {Request} from 'express';
 import {z} from 'zod';
 import type {SQL} from './database.ts';
-import {fail} from './security.ts';
+import {readZitadelSettings,setZitadelGeneration,zitadelCallback,zitadelSettingsInput} from './zitadel.ts';
+import {fail,secret} from './security.ts';
 import {registrationModes} from '../../shared/registration.ts';
 import {issueAccountLink,registrationMode} from './registration.ts';
 import type {AdminActivity,AdminMembership,AdminResource,AdminUser,ResourceCounts} from '../../shared/admin-directory.ts';
@@ -113,6 +114,31 @@ export function registerManagementRoutes(route:ManagementRoute,origin:string,loc
   await sql.run("INSERT INTO service_settings(key,value) VALUES('registration_mode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[mode]);
   await log(sql,actor,`admin.registration.${mode}`,null,null);
   return {body:{mode,automaticAvailable:local,emailAvailable}};
+ },false);
+ route('get',`${prefix}/zitadel`,async ctx=>{
+  await authorize(ctx);
+  const {config,generation}=await readZitadelSettings(ctx.sql);
+  return {body:{issuer:config?.issuer??'',clientId:config?.clientId??'',enabled:!!(config&&generation),callbackUrl:origin+zitadelCallback}};
+ },false);
+ route('post',`${prefix}/zitadel/config`,async ctx=>{
+  const actor=await authorize(ctx,true);
+  const {issuer,clientId}=zitadelSettingsInput.parse(ctx.req.body);
+  const {config}=await readZitadelSettings(ctx.sql);
+  if(config?.issuer===issuer&&config.clientId===clientId)return {};
+  await ctx.sql.run("INSERT INTO service_settings(key,value) VALUES('zitadel_issuer',?),('zitadel_client_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[issuer,clientId]);
+  await setZitadelGeneration(ctx.sql,'');
+  await log(ctx.sql,actor,'admin.zitadel.configured',null,null);
+  return {};
+ },false);
+ route('post',`${prefix}/zitadel`,async ctx=>{
+  const actor=await authorize(ctx,true);
+  const {enabled}=z.object({enabled:z.boolean()}).strict().parse(ctx.req.body);
+  const {config,generation}=await readZitadelSettings(ctx.sql);
+  if(enabled&&!config)fail(409,'Save the ZITADEL issuer and client ID before enabling SSO.');
+  if(enabled===!!generation)return {body:{enabled}};
+  await setZitadelGeneration(ctx.sql,enabled?secret():'');
+  await log(ctx.sql,actor,enabled?'admin.zitadel.enabled':'admin.zitadel.disabled',null,null);
+  return {body:{enabled}};
  },false);
  route('get',`${prefix}/overview`,async ctx=>{
   await authorize(ctx);

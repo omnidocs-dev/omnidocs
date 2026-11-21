@@ -61,3 +61,12 @@ export async function consumeCaptcha(sql:SQL,purpose:CaptchaPurpose,client:strin
   [id,purpose,client,Date.now()]);
  return record?.answer;
 }
+
+export async function reserveCaptchaFreeAttempt(sql:SQL,purpose:CaptchaPurpose,client:string){
+ const now=Date.now(),expires=now+15*60_000,bucket=`captcha:retry:${purpose}:${client}`;
+ // Reserve before checking credentials so concurrent requests share one CAPTCHA-free attempt.
+ const [record]=await sql.all(
+  'INSERT INTO rate_limits(bucket,count,expires) VALUES(?,1,?) ON CONFLICT(bucket) DO UPDATE SET expires=excluded.expires WHERE rate_limits.expires<=? RETURNING bucket',
+  [bucket,expires,now]);
+ return record?{bucket,expires}:undefined;
+}

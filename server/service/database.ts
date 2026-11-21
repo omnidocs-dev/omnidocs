@@ -1,3 +1,4 @@
+import {zitadelSchema} from './zitadel.ts';
 import {historySchema} from './history.ts';
 import {managementSchema} from './admin-management.ts';
 import {adminOtpSchema,adminSessionSchema} from './admin.ts';
@@ -83,7 +84,7 @@ export async function migrate(db:Database){await db.transaction(async sql=>{
  'CREATE TABLE IF NOT EXISTS rate_limits (bucket TEXT PRIMARY KEY,count INTEGER NOT NULL,expires BIGINT NOT NULL)',
  'CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY,user_id TEXT,action TEXT NOT NULL,resource_id TEXT,created_at BIGINT NOT NULL)',
  'CREATE INDEX IF NOT EXISTS "session_user" ON sessions(user_id)', 'CREATE INDEX IF NOT EXISTS member_email ON memberships(email)', 'CREATE INDEX IF NOT EXISTS resource_parent ON resources(parent_id)'];
- for(const statement of [...statements,adminSessionSchema,...adminOtpSchema,...historySchema,...managementSchema,...registrationSchema,...captchaSchema])await sql.run(statement);
+ for(const statement of [...statements,adminSessionSchema,...adminOtpSchema,...historySchema,...managementSchema,...registrationSchema,...captchaSchema,...zitadelSchema])await sql.run(statement);
  for(const [name,definition] of Object.entries({platform_role:"TEXT NOT NULL DEFAULT 'member'",login_name:'TEXT'})){
   const [column]=await sql.all(db.kind==='postgres'
    ? "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='users' AND column_name=?"

@@ -131,7 +131,7 @@
 .account-entry .account-form, .account-verify-actions { display: grid; gap: 14px; }
 .account-form label { font-size: 14px; }
 .account-form input { width: 100%; min-height: 44px; }
-.account-form .button.primary,.account-verify-actions .button { min-height: 44px; justify-content: center; }
+.account-form .button.primary,.account-form .account-sso,.account-verify-actions .button { min-height: 44px; justify-content: center; }
 .account-form .account-field-note { margin: -8px 0 0; font-size: 13px; color: var(--sketch-muted); }
 .account-password { position: relative; display: block; }
 .account-password input { padding-right: 45px; }
