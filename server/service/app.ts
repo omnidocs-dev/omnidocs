@@ -190,7 +190,7 @@ export async function createServiceApp(options:ServiceOptions){
    trace.step('prepare_authorization');
    const nonce=oidc.randomNonce(),verifier=oidc.randomPKCECodeVerifier();
    const authorization=oidc.buildAuthorizationUrl(config,{
-    redirect_uri:origin+zitadelCallback,scope:'openid email',state,nonce,
+    redirect_uri:origin+zitadelCallback,scope:'openid email profile',state,nonce,
     code_challenge:await oidc.calculatePKCECodeChallenge(verifier),code_challenge_method:'S256',
    });
    const stored=await db.transaction(async sql=>{
@@ -247,14 +247,22 @@ export async function createServiceApp(options:ServiceOptions){
    trace.step('match_account_and_create_session');
    const session=await db.transaction(async sql=>{
     if(flow.generation!==(await readZitadelSettings(sql)).generation)return 'settings_changed';
-    const [user]=await accountForLogin(sql,address.data);
-    if(!user)return 'eligible_member_not_found';
-    if(!user.verified)return 'member_email_unverified';
-    if(user.suspended)return 'member_suspended';
+    if(address.data.endsWith('@'+adminEmailDomain))return 'reserved_member_email';
+    const [existing]=await accountForLogin(sql,address.data);
+    if(existing&&!existing.verified)return 'member_email_unverified';
+    if(existing?.suspended)return 'member_suspended';
+    if(!existing&&(await sql.all('SELECT 1 FROM users WHERE email=?',[address.data])).length)return 'member_ineligible';
     const identities=await sql.all<{subject:string;user_id:string}>(
      'SELECT subject,user_id FROM zitadel_identities WHERE issuer=? AND (user_id=? OR subject=?)',
-     [provider.issuer,user.id,claims.sub]);
-    if(identities.some(identity=>identity.subject!==claims.sub||identity.user_id!==user.id))return 'identity_mismatch';
+     [provider.issuer,existing?.id??null,claims.sub]);
+    if(identities.some(identity=>identity.subject!==claims.sub||identity.user_id!==existing?.id))return 'identity_mismatch';
+    const displayName=name.safeParse(profile.name);
+    const user=existing??{id:randomUUID(),email:address.data,name:displayName.success?displayName.data:address.data.split('@')[0],verified:1};
+    if(!existing){
+     await sql.run('INSERT INTO users(id,email,name,password,verified,created_at) VALUES(?,?,?,?,?,?)',
+      [user.id,user.email,user.name,'!',user.verified,stamp()]);
+     await audit(sql,user,'account.zitadel_created');
+    }
     if(!identities.length)await sql.run('INSERT INTO zitadel_identities(issuer,subject,user_id) VALUES(?,?,?)',[provider.issuer,claims.sub,user.id]);
     return createMemberSession(sql,user,'account.zitadel_sign_in');
    },'global');

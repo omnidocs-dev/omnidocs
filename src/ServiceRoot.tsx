@@ -148,7 +148,7 @@ function AuthScreen({route,error:external,onComplete}:{route:string[];error:stri
  }
 
  return <AccountFrame title={title} description={description}>
-  {login&&route[1]==='zitadel-error'&&<p className="editor-error" role="alert">SSO login failed. Use the verified email on your OmniDocs account or contact your administrator.</p>}
+  {login&&route[1]==='zitadel-error'&&<p className="editor-error" role="alert">SSO login failed. Check that your email is verified in ZITADEL or contact your administrator.</p>}
   <form className="editor-form account-form" onSubmit={event=>void submit(event)}>
    {register&&<label>Name<input required autoComplete="name" maxLength={160} value={name} onChange={event=>setName(event.target.value)}/></label>}
    {showEmail&&<label>Email<input required type="email" autoComplete="email" maxLength={254} value={email} onChange={event=>setEmail(event.target.value)}/></label>}

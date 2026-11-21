@@ -80,7 +80,7 @@ In setup, choose HTTPS, enter the public hostname and port, configure the initia
 3. In OmniDocs, enter the ZITADEL **Issuer URL** (the instance's HTTPS origin) and **Client ID**. Click **Save ZITADEL settings**, then **Enable ZITADEL SSO**. The member sign-in page now shows **Login with SSO**.
 4. To turn it off, return to the same settings and click **Disable ZITADEL SSO**. This blocks new sign-ins through SSO. Existing OmniDocs sessions stay active.
 
-OmniDocs stores both settings in its database. Changing the issuer or Client ID disables SSO until you enable it again. Members need an active OmniDocs account with the same verified email in ZITADEL.
+OmniDocs stores both settings in its database. Changing the issuer or Client ID disables SSO until you enable it again. When someone signs in with a verified ZITADEL email for the first time, OmniDocs uses the matching active member account or creates a new member account.
 
 ## Enable or disable email verification
 

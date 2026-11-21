@@ -228,7 +228,7 @@ test('ZITADEL sign-in validates the identity and honors the administrator toggle
  t.mock.method(console,'info',(message:string)=>traces.push(message));
  t.mock.method(console,'warn',(message:string)=>traces.push(message));
  const {publicKey,privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
- let nonce='',challenge='',verified=true,subject='member-subject',rejectToken=false;
+ let nonce='',challenge='',verified=true,subject='member-subject',profileEmail='member@example.com',rejectToken=false;
  const encode=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString('base64url');
  t.mock.method(globalThis,'fetch',async(input:URL|Request|string,init?:RequestInit)=>{
   switch(String(input)){
@@ -249,7 +249,7 @@ test('ZITADEL sign-in validates the identity and honors the administrator toggle
    case issuer+'/jwks':
     return Response.json({keys:[{...publicKey.export({format:'jwk'}),kid:'test',alg:'RS256',use:'sig'}]});
    case issuer+'/userinfo':
-    return Response.json({sub:subject,email:'member@example.com',email_verified:verified});
+    return Response.json({sub:subject,email:profileEmail,email_verified:verified,name:'SSO Member'});
    default: throw new Error('Unexpected OIDC request');
   }
  });
@@ -291,6 +291,31 @@ test('ZITADEL sign-in validates the identity and honors the administrator toggle
  for(const secret of [issuer,clientId,nonce,'test-access-token','private-provider-description','member@example.com',new URL(attempt.url,origin).searchParams.get('state')!]){
   assert.ok(traces.every(line=>!line.includes(secret)));
  }
+ subject='new-member-subject';
+ profileEmail='new-sso-member@example.com';
+ verified=false;
+ const unverifiedSignup=await begin();
+ assert.equal((await f.call('GET',unverifiedSignup.url,undefined,unverifiedSignup.session)).headers.location,'/#/login/zitadel-error');
+ assert.deepEqual(await f.db.transaction(sql=>sql.all('SELECT id FROM users WHERE email=?',[profileEmail]),'read'),[]);
+ verified=true;
+ const signup=await begin();
+ const created=await f.call('GET',signup.url,undefined,signup.session);
+ assert.equal(created.headers.location,'/');
+ const createdCookie=(created.headers['set-cookie'] as string[]).find(cookie=>cookie.startsWith('omnidocs_session='))!.split(';')[0];
+ const {user:newMember}= (await f.call('GET','/api/auth/me',undefined,{cookie:createdCookie,csrf:''})).data;
+ assert.equal(newMember.email,profileEmail);
+ assert.equal(newMember.name,'SSO Member');
+ assert.equal(newMember.verified,true);
+ const repeat=await begin();
+ assert.equal((await f.call('GET',repeat.url,undefined,repeat.session)).headers.location,'/');
+ const rows=await f.db.transaction(sql=>sql.all('SELECT id,platform_role FROM users WHERE email=?',[profileEmail]),'read');
+ assert.equal(rows.length,1);
+ assert.equal(rows[0].id,newMember.id);
+ assert.equal(rows[0].platform_role,'member');
+ profileEmail='changed-sso-email@example.com';
+ const changedEmail=await begin();
+ assert.equal((await f.call('GET',changedEmail.url,undefined,changedEmail.session)).headers.location,'/#/login/zitadel-error');
+ assert.deepEqual(await f.db.transaction(sql=>sql.all('SELECT id FROM users WHERE email=?',[profileEmail]),'read'),[]);
  const pending=await begin();
  assert.equal((await f.call('POST',settings,{enabled:false},admin)).status,200);
  assert.equal((await f.call('GET','/api/auth/registration')).data.zitadelEnabled,false);
