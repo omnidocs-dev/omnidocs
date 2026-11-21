@@ -37,3 +37,44 @@ export function discoverZitadel({issuer,clientId}:z.infer<typeof zitadelSettings
   timeout:8,execute:[oidc.enableNonRepudiationChecks],
  });
 }
+
+const oauthErrors=new Set([
+ 'access_denied','invalid_request','invalid_client','invalid_grant','invalid_scope','unauthorized_client',
+ 'unsupported_grant_type','unsupported_response_type','interaction_required','login_required','consent_required',
+ 'account_selection_required','server_error','temporarily_unavailable',
+]);
+const diagnosticCodes=new Set([
+ 'OAUTH_INVALID_RESPONSE','OAUTH_INVALID_SERVER_METADATA','OAUTH_MISSING_SERVER_METADATA',
+ 'OAUTH_JWT_CLAIM_COMPARISON_FAILED','OAUTH_JWT_TIMESTAMP_CHECK_FAILED','OAUTH_KEY_SELECTION_FAILED',
+ 'OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED','OAUTH_PARSE_ERROR','OAUTH_RESPONSE_IS_NOT_JSON',
+ 'OAUTH_RESPONSE_IS_NOT_CONFORM','OAUTH_UNSUPPORTED_OPERATION','OAUTH_WWW_AUTHENTICATE_CHALLENGE',
+ 'OAUTH_REQUEST_PROTOCOL_FORBIDDEN','OAUTH_HTTP_REQUEST_FORBIDDEN','OAUTH_JWT_USERINFO_EXPECTED',
+ 'OAUTH_INVALID_REQUEST','OAUTH_TIMEOUT','OAUTH_ABORT',
+ 'ENOTFOUND','EAI_AGAIN','ECONNREFUSED','ECONNRESET','ETIMEDOUT','UND_ERR_CONNECT_TIMEOUT',
+ 'CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN',
+ 'ERR_TLS_CERT_ALTNAME_INVALID','UNABLE_TO_VERIFY_LEAF_SIGNATURE','UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+]);
+const claimNames=new Set(['iss','sub','aud','azp','nonce','iat','exp','nbf','auth_time']);
+export function zitadelErrorDetails(error:unknown){
+ if(error instanceof oidc.AuthorizationResponseError||error instanceof oidc.ResponseBodyError){
+  return {
+   reason:error instanceof oidc.AuthorizationResponseError?'provider_authorization_error':'provider_endpoint_error',
+   providerError:oauthErrors.has(error.error)?error.error:'unrecognized',
+   upstreamStatus:error instanceof oidc.ResponseBodyError?error.status:undefined,
+  };
+ }
+ const details:{reason:string;code?:string;claim?:string;upstreamStatus?:number}={reason:'unexpected_error'};
+ // Error messages, causes and response bodies may contain URLs, claims or credentials.
+ for(let current=error,depth=0;depth<5&&current&&typeof current==='object';depth++){
+  if('code' in current&&typeof current.code==='string'&&diagnosticCodes.has(current.code)){
+   details.reason='provider_or_network_error';
+   details.code??=current.code;
+  }
+  if(current instanceof Error&&current.name==='TimeoutError')details.reason='upstream_timeout';
+  if(current instanceof Response)details.upstreamStatus=current.status;
+  if('response' in current&&current.response instanceof Response)details.upstreamStatus=current.response.status;
+  if('claim' in current&&typeof current.claim==='string'&&claimNames.has(current.claim))details.claim=current.claim;
+  current='cause' in current?current.cause:undefined;
+ }
+ return details;
+}

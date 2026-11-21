@@ -28,6 +28,8 @@ The built HTML file is an offline workspace snapshot, not the hosted account sys
 
 SSO is disabled by default. Members first need an active, verified OmniDocs account with the same verified email in ZITADEL. The first successful sign-in binds that account to the ZITADEL identity. Use a ZITADEL instance whose email verification you trust. Administrators continue to use the separate `/admin/` sign-in. **Disable ZITADEL SSO** blocks new and in-progress SSO sign-ins. Existing OmniDocs sessions remain active until sign-out, expiration, or revocation in **Admin → Users**.
 
+When diagnosing a sign-in failure, run `./omnidocs logs -f backend` on the deployment server or watch the terminal running the local service. Reproduce the sign-in and look for `sso.failed`. The `flowId` links the start and callback logs. The `stage` and `reason` identify where the attempt stopped. A trace that ends at `redirect_to_provider` shows that OmniDocs logged the outbound redirect and received no matching callback.
+
 ## Accounts and administrator access
 
 - Users can open `/#/login`, `/#/register` and `/#/forgot` on the service URL. Public registration creates a standard account.

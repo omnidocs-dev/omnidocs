@@ -1,5 +1,5 @@
 import * as oidc from 'openid-client';
-import {discoverZitadel,readZitadelSettings,zitadelCallback} from './zitadel.ts';
+import {discoverZitadel,readZitadelSettings,zitadelCallback,zitadelErrorDetails} from './zitadel.ts';
 import {consumeCaptcha,createCaptcha,reserveCaptchaFreeAttempt} from './captcha.ts';
 import {issueAccountLink,registrationMode} from './registration.ts';
 import {adminEmailDomain,bootstrapAdmin,readAdminAccount,registerAdminRoutes,type AdminCredentials} from './admin.ts';
@@ -157,69 +157,112 @@ export async function createServiceApp(options:ServiceOptions){
  const flowCookie=secure?'__Host-omnidocs_zitadel':'omnidocs_zitadel';
  const flowCookieOptions={httpOnly:true,sameSite:'lax' as const,secure,path:'/'};
  const ssoFailure='/#/login/zitadel-error';
- app.get('/api/auth/zitadel/start',async(req,res)=>{
+ const zitadelStart='/api/auth/zitadel/start';
+ function traceZitadel(route:string,state:string|undefined,res:express.Response){
+  const flowId=state?digest(state).slice(0,16):randomUUID();
+  const started=performance.now();
+  let stage='request_received';
+  function log(level:'info'|'warn',event:string,details?:ReturnType<typeof zitadelErrorDetails>){
+   console[level](JSON.stringify({
+    time:new Date().toISOString(),level,event,route,flowId,stage,
+    elapsedMs:Math.round(performance.now()-started),...details,
+   }));
+  }
+  log('info','sso.progress');
+  return {
+   step(value:string){stage=value;log('info','sso.progress');},
+   fail(details:ReturnType<typeof zitadelErrorDetails>){
+    log('warn','sso.failed',details);
+    res.redirect(303,ssoFailure);
+   },
+   success(){log('info','sso.succeeded');},
+  };
+ }
+ app.get(zitadelStart,async(req,res)=>{
+  const state=oidc.randomState(),trace=traceZitadel(zitadelStart,state,res);
   try{
+   trace.step('load_settings');
    await db.transaction(sql=>rateLimit(sql,`zitadel:start:${req.ip}`,30),'independent');
    const {config:provider,generation}=await db.transaction(readZitadelSettings,'read');
-   if(!provider||!generation)return void res.redirect(303,ssoFailure);
+   if(!provider||!generation)return trace.fail({reason:'sso_unavailable'});
+   trace.step('discover_provider');
    const config=await discoverZitadel(provider);
-   const state=oidc.randomState(),nonce=oidc.randomNonce(),verifier=oidc.randomPKCECodeVerifier();
+   trace.step('prepare_authorization');
+   const nonce=oidc.randomNonce(),verifier=oidc.randomPKCECodeVerifier();
    const authorization=oidc.buildAuthorizationUrl(config,{
     redirect_uri:origin+zitadelCallback,scope:'openid email',state,nonce,
     code_challenge:await oidc.calculatePKCECodeChallenge(verifier),code_challenge_method:'S256',
    });
-   await db.transaction(async sql=>{
-    if((await readZitadelSettings(sql)).generation!==generation)fail(403,'ZITADEL SSO is unavailable.');
+   const stored=await db.transaction(async sql=>{
+    if((await readZitadelSettings(sql)).generation!==generation)return false;
     await sql.run('DELETE FROM zitadel_flows WHERE expires<=?',[stamp()]);
     await sql.run('INSERT INTO zitadel_flows(hash,verifier,nonce,generation,expires) VALUES(?,?,?,?,?)',
      [digest(state),verifier,nonce,generation,stamp()+600_000]);
+    return true;
    },'global');
+   if(!stored)return trace.fail({reason:'settings_changed'});
    res.cookie(flowCookie,state,{...flowCookieOptions,maxAge:600_000});
+   trace.step('redirect_to_provider');
    res.redirect(303,authorization.href);
-  }catch{res.redirect(303,ssoFailure);}
+  }catch(error){trace.fail(error instanceof ServiceError&&error.status===429?{reason:'rate_limited'}:zitadelErrorDetails(error));}
  });
  app.get(zitadelCallback,async(req,res)=>{
   const state=(req.headers.cookie??'').split(';').map(value=>value.trim()).find(value=>value.startsWith(flowCookie+'='))?.slice(flowCookie.length+1);
   const callback=new URL(origin+zitadelCallback);
   callback.search=req.originalUrl.slice(req.path.length);
-  if(!state||callback.searchParams.getAll('state').length!==1||callback.searchParams.get('state')!==state){
-   res.redirect(303,ssoFailure);return;
-  }
+  const callbackState=callback.searchParams.get('state');
+  const trace=traceZitadel(zitadelCallback,callbackState??state,res);
+  trace.step('validate_callback');
+  if(!state)return trace.fail({reason:'flow_cookie_missing'});
+  if(callback.searchParams.getAll('state').length!==1||callbackState!==state)return trace.fail({reason:'state_mismatch'});
   res.clearCookie(flowCookie,flowCookieOptions);
   try{
+   trace.step('consume_flow');
    const attempt=await db.transaction(async sql=>{
-    const [pending]=await sql.all<{verifier:string;nonce:string;generation:string}>('SELECT verifier,nonce,generation FROM zitadel_flows WHERE hash=? AND expires>?',[digest(state),stamp()]);
+    const [pending]=await sql.all<{verifier:string;nonce:string;generation:string;expires:number}>('SELECT verifier,nonce,generation,expires FROM zitadel_flows WHERE hash=?',[digest(state)]);
     const {config:provider,generation}=await readZitadelSettings(sql);
-    if(!pending||!provider||pending.generation!==generation)return undefined;
+    if(!provider||!generation)return 'sso_unavailable';
+    if(!pending)return 'flow_missing_or_consumed';
+    if(Number(pending.expires)<=stamp())return 'flow_expired';
+    if(pending.generation!==generation)return 'settings_changed';
     await sql.run('DELETE FROM zitadel_flows WHERE hash=?',[digest(state)]);
     return {flow:pending,provider};
    },'global');
-   if(!attempt)return void res.redirect(303,ssoFailure);
+   if(typeof attempt==='string')return trace.fail({reason:attempt});
    const {flow,provider}=attempt;
+   trace.step('discover_provider');
    const config=await discoverZitadel(provider);
+   trace.step('exchange_code_and_validate_id_token');
    const tokens=await oidc.authorizationCodeGrant(config,callback,{
     expectedState:state,expectedNonce:flow.nonce,pkceCodeVerifier:flow.verifier,
    });
    const claims=tokens.claims();
-   if(!claims?.sub)return void res.redirect(303,ssoFailure);
+   if(!claims?.sub)return trace.fail({reason:'subject_missing'});
+   trace.step('fetch_userinfo');
    const profile=await oidc.fetchUserInfo(config,tokens.access_token,claims.sub);
+   trace.step('validate_email');
    const address=email.safeParse(profile.email);
-   if(profile.email_verified!==true||!address.success)return void res.redirect(303,ssoFailure);
-   const token=await db.transaction(async sql=>{
-    if(flow.generation!==(await readZitadelSettings(sql)).generation)return undefined;
+   if(!address.success)return trace.fail({reason:'email_missing_or_invalid'});
+   if(profile.email_verified!==true)return trace.fail({reason:'email_unverified'});
+   trace.step('match_account_and_create_session');
+   const session=await db.transaction(async sql=>{
+    if(flow.generation!==(await readZitadelSettings(sql)).generation)return 'settings_changed';
     const [user]=await accountForLogin(sql,address.data);
-    if(!user?.verified||user.suspended)return undefined;
+    if(!user)return 'eligible_member_not_found';
+    if(!user.verified)return 'member_email_unverified';
+    if(user.suspended)return 'member_suspended';
     const identities=await sql.all<{subject:string;user_id:string}>(
      'SELECT subject,user_id FROM zitadel_identities WHERE issuer=? AND (user_id=? OR subject=?)',
      [provider.issuer,user.id,claims.sub]);
-    if(identities.some(identity=>identity.subject!==claims.sub||identity.user_id!==user.id))return undefined;
+    if(identities.some(identity=>identity.subject!==claims.sub||identity.user_id!==user.id))return 'identity_mismatch';
     if(!identities.length)await sql.run('INSERT INTO zitadel_identities(issuer,subject,user_id) VALUES(?,?,?)',[provider.issuer,claims.sub,user.id]);
     return createMemberSession(sql,user,'account.zitadel_sign_in');
    },'global');
-   if(!token)return void res.redirect(303,ssoFailure);
-   res.append('Set-Cookie',sessionCookie(token.token));
+   if(typeof session==='string')return trace.fail({reason:session});
+   res.append('Set-Cookie',sessionCookie(session.token));
+   trace.success();
    res.redirect(303,'/');
-  }catch{res.redirect(303,ssoFailure);}
+  }catch(error){trace.fail(zitadelErrorDetails(error));}
  });
  async function createMemberSession(sql:SQL,user:User,action='account.sign_in'){
   const token=secret(),csrf=secret();

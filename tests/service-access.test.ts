@@ -224,8 +224,11 @@ test('ZITADEL sign-in validates the identity and honors the administrator toggle
  assert.equal((await f.call('POST',settings,{enabled:true},admin)).status,200);
  assert.equal((await f.call('GET','/api/auth/registration')).data.zitadelEnabled,true);
 
+ const traces:string[]=[];
+ t.mock.method(console,'info',(message:string)=>traces.push(message));
+ t.mock.method(console,'warn',(message:string)=>traces.push(message));
  const {publicKey,privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
- let nonce='',challenge='',verified=true,subject='member-subject';
+ let nonce='',challenge='',verified=true,subject='member-subject',rejectToken=false;
  const encode=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString('base64url');
  t.mock.method(globalThis,'fetch',async(input:URL|Request|string,init?:RequestInit)=>{
   switch(String(input)){
@@ -234,6 +237,7 @@ test('ZITADEL sign-in validates the identity and honors the administrator toggle
      jwks_uri:issuer+'/jwks',userinfo_endpoint:issuer+'/userinfo',id_token_signing_alg_values_supported:['RS256'],
      code_challenge_methods_supported:['S256'],token_endpoint_auth_methods_supported:['none']});
    case issuer+'/token': {
+    if(rejectToken)return Response.json({error:'invalid_grant',error_description:'private-provider-description'},{status:400});
     const body=new URLSearchParams(String(init?.body));
     assert.equal(createHash('sha256').update(body.get('code_verifier')!).digest('base64url'),challenge);
     assert.equal(body.get('redirect_uri'),origin+callback);
@@ -272,6 +276,21 @@ test('ZITADEL sign-in validates the identity and honors the administrator toggle
  subject='different-subject';
  const mismatched=await begin();
  assert.equal((await f.call('GET',mismatched.url,undefined,mismatched.session)).headers.location,'/#/login/zitadel-error');
+ rejectToken=true;
+ const rejected=await begin();
+ assert.equal((await f.call('GET',rejected.url,undefined,rejected.session)).headers.location,'/#/login/zitadel-error');
+ rejectToken=false;
+ const events=traces.map(line=>JSON.parse(line));
+ const success=events.find(event=>event.event==='sso.succeeded');
+ assert.ok(success);
+ assert.ok(events.some(event=>event.flowId===success.flowId&&event.stage==='redirect_to_provider'));
+ assert.ok(events.some(event=>event.flowId===success.flowId&&event.reason==='flow_cookie_missing'));
+ assert.ok(events.some(event=>event.stage==='validate_email'&&event.reason==='email_unverified'));
+ assert.ok(events.some(event=>event.stage==='match_account_and_create_session'&&event.reason==='identity_mismatch'));
+ assert.ok(events.some(event=>event.stage==='exchange_code_and_validate_id_token'&&event.providerError==='invalid_grant'&&event.upstreamStatus===400));
+ for(const secret of [issuer,clientId,nonce,'test-access-token','private-provider-description','member@example.com',new URL(attempt.url,origin).searchParams.get('state')!]){
+  assert.ok(traces.every(line=>!line.includes(secret)));
+ }
  const pending=await begin();
  assert.equal((await f.call('POST',settings,{enabled:false},admin)).status,200);
  assert.equal((await f.call('GET','/api/auth/registration')).data.zitadelEnabled,false);
