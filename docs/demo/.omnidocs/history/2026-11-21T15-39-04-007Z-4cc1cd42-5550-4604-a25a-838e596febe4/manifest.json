@@ -1,0 +1,13 @@
+{
+  "revision": "8376111260917f29efb42a42b89add1933c038bd14dbdf39648e1dd10aef90b4",
+  "files": [
+    {
+      "path": "entities/worker.md",
+      "existed": true
+    },
+    {
+      "path": "views/order-flow.md",
+      "existed": true
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "revision": "c48a3aaf8bd47325cbcfe368690c9ce8574d3d07b9861adeb9e90f95e8c28a25",
+  "files": [
+    {
+      "path": "views/deployment/workspace/studio.f79ad4534ded.md",
+      "existed": true
+    },
+    {
+      "path": "studio/entities/studio.fbc46b5acdf1.md",
+      "existed": false
+    }
+  ]
+}

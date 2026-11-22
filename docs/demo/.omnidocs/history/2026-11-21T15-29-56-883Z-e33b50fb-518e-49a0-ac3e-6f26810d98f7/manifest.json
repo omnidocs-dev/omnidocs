@@ -1,0 +1,13 @@
+{
+  "revision": "dd436c2d79efbcc7263b68833f4110aeebe29e81a0556dcee5c508a732da056c",
+  "files": [
+    {
+      "path": "views/checkout-code.md",
+      "existed": true
+    },
+    {
+      "path": "studio/entities/studio.48a82fcacc9c.md",
+      "existed": false
+    }
+  ]
+}

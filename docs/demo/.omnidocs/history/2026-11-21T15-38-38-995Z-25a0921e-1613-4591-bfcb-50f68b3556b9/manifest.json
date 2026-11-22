@@ -1,0 +1,13 @@
+{
+  "revision": "97d2e29036266f52536a0d0c790b89213e62489900de737d708a037def099231",
+  "files": [
+    {
+      "path": "views/api-components.md",
+      "existed": true
+    },
+    {
+      "path": "studio/entities/studio.abbdc1196502.md",
+      "existed": false
+    }
+  ]
+}
