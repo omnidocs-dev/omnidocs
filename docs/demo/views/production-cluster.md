@@ -11,6 +11,7 @@ nodes:
   - prod-app
   - data-node
   - prod-telemetry
+  - studio.2bd795bbfee2
 description: "Inside the production Kubernetes cluster: control plane, compute,
   ingress, namespaces, and monitoring."
 parentView: production

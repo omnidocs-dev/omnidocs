@@ -1,3 +1,4 @@
+import {elementTypeLabel} from './element-types.ts';
 import {flowLayersView} from './flow-layers.ts';
 import {inlineContextView} from './inline-context.ts';
 import {ownershipView} from './ownership-frames.ts';
@@ -99,7 +100,7 @@ async function layoutBoundaries(view: View, items: LayoutNode[], relations: Rela
 }
 
 /** Each occurrence has its own ID: an external system may occur at several levels. */
-export async function layoutCanvas(model: Model, view: View, expanded: ReadonlySet<string>, parentId?: string, ancestors: ReadonlySet<string> = new Set(), visible: ReadonlyMap<string, string> = new Map(), options:Arrangement=defaultArrangement): Promise<CanvasLayout> {
+export async function layoutCanvas(model: Model, view: View, expanded: ReadonlySet<string>, parentId?: string, ancestors: ReadonlySet<string> = new Set(), visible: ReadonlyMap<string, string> = new Map(), options:Arrangement=defaultArrangement, symbols=false): Promise<CanvasLayout> {
  const stack = new Set(ancestors).add(view.id);
  const originalView = view;
  view=inlineContextView(model,view,expanded,parentId);
@@ -124,9 +125,9 @@ export async function layoutCanvas(model: Model, view: View, expanded: ReadonlyS
   if (!entity) return undefined;
   const id = canvasNodeId(entityId, parentId), child = view.layout==='levels'?undefined:childView(model, entityId);
   const open = expanded.has(id) && child && !stack.has(child.id);
-  const inner = open ? await layoutCanvas(model, child, expanded, id, stack, occurrences, options) : undefined;
+  const inner = open ? await layoutCanvas(model, child, expanded, id, stack, occurrences, options, symbols) : undefined;
   const node: LayoutNode = { id, entity, view, child: child && !stack.has(child.id) ? child : undefined, parentId,
-   expanded: !!inner, position: { x: 0, y: 0 }, width: inner ? Math.max(390, inner.width) : 274, height: inner ? Math.max(230, inner.height + 100) : (view.entryPoints.some(entry => entry.node === entityId) ? 276 : 246) + (entity.name.length > 24 ? 24 : 0) + (entity.description.length > 110 ? 22 : 0) };
+   expanded: !!inner, position: { x: 0, y: 0 }, width: inner ? Math.max(390, inner.width) : symbols ? 196 : 274, height: inner ? Math.max(230, inner.height + 100) : symbols ? 176+(elementTypeLabel(entity).length>18?25:0)+(entity.name.length>22?23:0) : (view.entryPoints.some(entry => entry.node === entityId) ? 276 : 246) + (entity.name.length > 24 ? 24 : 0) + (entity.description.length > 110 ? 22 : 0) };
   return { node, inner };
  }));
  const items = prepared.filter((item): item is NonNullable<typeof item> => !!item);

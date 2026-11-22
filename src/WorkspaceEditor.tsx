@@ -1,11 +1,13 @@
+import {BpmnProcessEditor} from './BpmnProcessEditor';
+import {FlowItemPicker} from './FlowItemPicker';
 import {ViewLevelPicker} from './ViewLevelPicker';
 import {TechnologyField} from './TechnologyField';
 import {ItemTypePicker} from './ItemTypePicker';
 import {abstractionLevel} from '../shared/ownership-frames';
-import {existingViewCandidates} from '../shared/view-membership';
+import {isC4FlowItem,existingViewCandidates} from '../shared/view-membership';
 import {createPortal} from 'react-dom';
 import { useEffect, useRef, useState } from 'react';
-import { PencilSimple, Plus, GitBranch, FloppyDisk, X, Trash, ArrowCounterClockwise, Path, PlusCircle, FolderSimple, Cube, ArrowDownRight } from '@phosphor-icons/react';
+import { PencilSimple, Plus, GitBranch, FloppyDisk, X, Trash, ArrowCounterClockwise, Path, PlusCircle, FolderSimple, Cube, ArrowDownRight, HardDrives } from '@phosphor-icons/react';
 import { planEntityDeletion } from '../shared/entity-deletion';
 import { viewDocumentMoves } from '../shared/organize-views';
 import { elementTypes, elementKind, typesForView, typeForEntity, componentScopes } from '../shared/element-types';
@@ -15,11 +17,11 @@ import type { Model, SourceFile, View } from '../shared/model';
 import { childView, compileModel, relationsForView } from '../shared/model';
 import { saveDirectory, ensureDirectoryWritable } from './folder-write';
 
-export type EditorRequest = {nonce: number; action: 'edit'|'delete'|'add'|'next'|'connect'|'include'; id?:string; viewId?:string;level?:string};
+export type EditorRequest = {nonce: number; action: 'edit'|'delete'|'add'|'next'|'connect'|'include'|'flow-next'; id?:string; viewId?:string;level?:string};
 export type ConnectionRequest = { source: string; target: string; viewId: string; sourceHandle?:string;targetHandle?:string };
 export type LayoutRequest=Extract<EditCommand,{op:'layout.save'}>&{nonce:number};
-type FormCommand = Exclude<EditCommand, { op: 'relation.delete' | 'view.create' | 'workspace.organize' | 'entity.delete' | 'layout.save' | 'view.include' | 'flow.create' }>;
-type Props = {reviewRequired?:boolean; onSubmitted?:(id:string)=>void; toolboxTarget?:HTMLElement|null;readOnlyReason?:string; files: SourceFile[]; model: Model; view: View; selection: string | null; editing: boolean; connecting: boolean; onConnecting: (value: boolean) => void; directoryHandle: FileSystemDirectoryHandle | null; onConnectFolder: () => void; apiToken: string | null; spaceId: string | null; onViewCreated: (id: string) => void; layoutRequest:LayoutRequest|null; onLayoutError:(message:string)=>void; request: EditorRequest | null; connection: ConnectionRequest | null; onEditing: (value: boolean) => void; onPreview: (files: SourceFile[]) => void; onSaved: (files: SourceFile[], message: string, keepEditing?: boolean,presentationOnly?:boolean) => void };
+type FormCommand = Exclude<EditCommand, { op: 'relation.delete' | 'view.create' | 'workspace.organize' | 'entity.delete' | 'layout.save' | 'view.include' | 'flow.create' | 'deployment.create' | 'process.create' | 'process.update' | 'flow.start' | 'flow.link' | 'flow.unlink' | 'flow.remove' }>;
+type Props = {processDirty:boolean;onProcessDirty:(dirty:boolean)=>void;onEntity:(id:string)=>void;reviewRequired?:boolean; onSubmitted?:(id:string)=>void; toolboxTarget?:HTMLElement|null;readOnlyReason?:string; files: SourceFile[]; model: Model; view: View; selection: string | null; editing: boolean; connecting: boolean; onConnecting: (value: boolean) => void; directoryHandle: FileSystemDirectoryHandle | null; onConnectFolder: () => void; apiToken: string | null; spaceId: string | null; onViewCreated: (id: string) => void; layoutRequest:LayoutRequest|null; onLayoutError:(message:string)=>void; request: EditorRequest | null; connection: ConnectionRequest | null; onEditing: (value: boolean) => void; onPreview: (files: SourceFile[]) => void; onSaved: (files: SourceFile[], message: string, keepEditing?: boolean,presentationOnly?:boolean) => void };
 export function WorkspaceEditor(props: Props) {
  const { files, model, view, selection, editing } = props;
  const [base, setBase] = useState<SourceFile[]>(files), [commands, setCommands] = useState<EditCommand[]>([]);
@@ -28,7 +30,11 @@ export function WorkspaceEditor(props: Props) {
  const [reviewTitle, setReviewTitle] = useState('');
  const [form, setForm] = useState<FormCommand | null>(null), [review, setReview] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('');
  const [viewForm, setViewForm] = useState<{scope: string; name: string; description: string} | null>(null);
- const [flowForm,setFlowForm]=useState<{name:string;description:string}|null>(null);
+ const [flowForm,setFlowForm]=useState<{name:string;description:string;kind:'flow'|'deployment'|'process';scope?:string}|null>(null);
+ const [stepForm,setStepForm]=useState<{source:string;target:string;relationship:string;label:string;protocol:string;phase:'item'|'connection'}|null>(null);
+ const isFlow=view.type==='dataflow';
+ const startNode=view.entryPoints[0]?.node;
+ const flowItems=isFlow?model.entities.filter(isC4FlowItem):[];
  const [includeForm,setIncludeForm]=useState<{viewId:string;ids:string[];query:string;level?:string}|null>(null);
  const [deleteId,setDeleteId]=useState<string|null>(null);
  const deletion=deleteId?planEntityDeletion(model,deleteId):null;
@@ -36,24 +42,25 @@ export function WorkspaceEditor(props: Props) {
  const processedLayout=useRef<LayoutRequest|null>(null);
  const dialog = useRef<HTMLDialogElement>(null), processedRequest = useRef<EditorRequest|null>(null);
  const changes = editing ? fileChanges(base, files) : [];
- useEffect(() => { if ((form || review || viewForm || deletion || includeForm || flowForm) && dialog.current && !dialog.current.open) dialog.current.showModal(); }, [form, review, viewForm, deleteId,includeForm,flowForm]);
+ useEffect(() => { if ((form || review || viewForm || deletion || includeForm || flowForm || stepForm) && dialog.current && !dialog.current.open) dialog.current.showModal(); }, [form, review, viewForm, deleteId,includeForm,flowForm,stepForm]);
  useEffect(() => {
-  if (!editing || (!commands.length && !busy)) return;
+  if (!editing || (!commands.length && !busy && !props.processDirty)) return;
   const pending = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
   window.addEventListener('beforeunload', pending); return () => window.removeEventListener('beforeunload', pending);
- }, [editing, commands.length, busy]);
+ }, [editing, commands.length, busy,props.processDirty]);
  useEffect(() => { if (props.connection && editing) openRelation(props.connection); }, [props.connection]);
- const selectedEntity = model.entities.find(entity => entity.id === selection), selectedRelation = model.relations.find(relation => relation.id === selection);
+ const selectedEntity = model.entities.find(entity => entity.id === selection && (!isFlow||view.nodes.includes(entity.id)));
+ const selectedRelation = (isFlow?relationsForView(model,view):model.relations).find(relation => relation.id === selection);
  useEffect(() => {
-  if (!editing || (!selectedRelation && !selectedEntity) || busy || form || review || viewForm || deletion || includeForm || flowForm || props.connecting) return;
+  if (!editing || view.type==='bpmn' || (!selectedRelation && !selectedEntity) || busy || form || review || viewForm || deletion || includeForm || flowForm || stepForm || props.connecting) return;
   const remove = (event: KeyboardEvent) => {
    if (!['Delete','Backspace'].includes(event.key) || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
    const target = event.target;
    if (target instanceof Element && (target.closest('input,textarea,select,dialog') || (target as HTMLElement).isContentEditable)) return;
-   event.preventDefault(); if(selectedRelation)removeSelectedConnection();else if(selectedEntity)setDeleteId(selectedEntity.id);
+   event.preventDefault(); if(selectedRelation)removeSelectedConnection();else if(selectedEntity)removeSelectedItem();
   };
   window.addEventListener('keydown', remove); return () => window.removeEventListener('keydown', remove);
- }, [editing, selectedEntity, selectedRelation, busy, form, review, viewForm, deleteId, includeForm, flowForm, props.connecting, commands, base, model, view]);
+ }, [editing, selectedEntity, selectedRelation, busy, form, review, viewForm, deleteId, includeForm, flowForm, stepForm, props.connecting, commands, base, model, view]);
  useEffect(()=>{
   const request=props.request;if(!request||processedRequest.current===request)return;
   if(busy){processedRequest.current=request;return;}
@@ -61,10 +68,11 @@ export function WorkspaceEditor(props: Props) {
   if(!editing){if(!props.apiToken&&!props.directoryHandle){processedRequest.current=request;props.onConnectFolder();return;}begin();return;}
   processedRequest.current=request;
   if(request.action==='edit'){if(selectedRelation)openRelation();else openEntity(true);}
-  if(request.action==='delete'){if(selectedEntity)setDeleteId(selectedEntity.id);else if(selectedRelation)removeSelectedConnection();}
+  if(request.action==='delete'){if(selectedEntity)removeSelectedItem();else if(selectedRelation)removeSelectedConnection();}
   if(request.action==='add')openEntity(false,request.viewId);
   if(request.action==='include')openInclude(request.viewId,request.level);
   if(request.action==='next')nextLevel();
+  if(request.action==='flow-next'&&request.id&&request.viewId===view.id)openStep(request.id);
   if(request.action==='connect')props.onConnecting(true);
  },[props.request,editing]);
  useEffect(()=>{
@@ -73,7 +81,7 @@ export function WorkspaceEditor(props: Props) {
  },[props.layoutRequest,busy]);
  const ids = () => `studio.${crypto.randomUUID().replace(/-/g,'').slice(0,12)}`;
  function begin() { if(props.readOnlyReason)return; if (!props.apiToken && !props.directoryHandle) { props.onConnectFolder(); return; } setBase(files); setCommands([]); setError(''); setMessage(''); props.onEditing(true); }
- function closeDialog() { setFlowForm(null);setIncludeForm(null);setDeleteId(null); setViewForm(null); setForm(null); setReview(false); setError(''); dialog.current?.close(); }
+ function closeDialog() { setStepForm(null);setFlowForm(null);setIncludeForm(null);setDeleteId(null); setViewForm(null); setForm(null); setReview(false); setError(''); dialog.current?.close(); }
  function targetView(entityId?: string) {
   if (entityId && !view.nodes.includes(entityId)) return model.views.find(candidate => candidate.nodes.includes(entityId)) ?? view;
   return view;
@@ -109,7 +117,7 @@ export function WorkspaceEditor(props: Props) {
     props.onSaved(draft, 'Layout saved · draft kept', true, true);
     return;
    }
-   const original=editing?base:files,next = editing?[...commands,command]:[command], prepared = prepareEdits(original, next);
+   const original=editing?base:files,next = [...(editing?commands:[]),command], prepared = prepareEdits(original, next);
    if ((autoSave||!editing && !props.reviewRequired||command.op === 'layout.save' && !commands.length) && (props.apiToken || props.directoryHandle)) {
     setBusy(true);
     const result = await persist(next,original);
@@ -120,8 +128,9 @@ export function WorkspaceEditor(props: Props) {
     setMessage(props.reviewRequired?'Draft updated. Choose Review & submit when ready.':'Draft updated. Choose Review & save when ready.');
    }
    if(command.op!=='layout.save')closeDialog();
-   if (command.op === 'view.create'||command.op==='flow.create') props.onViewCreated(command.id);
-  } catch (error) { const message=error instanceof Error?error.message:'Cannot apply this change.';setError(message);if(command.op==='layout.save')props.onLayoutError(message); }
+   if (command.op === 'view.create'||command.op==='flow.create'||command.op==='deployment.create'||command.op==='process.create') props.onViewCreated(command.id);
+   return true;
+  } catch (error) { const message=error instanceof Error?error.message:'Cannot apply this change.';setError(message);if(command.op==='layout.save')props.onLayoutError(message);return false; }
   finally { setBusy(false); }
  }
  function preview() {
@@ -161,15 +170,36 @@ export function WorkspaceEditor(props: Props) {
   if (!selectedEntity) return;
   const existing = childView(model, selectedEntity.id);
   if (existing) { props.onViewCreated(existing.id); return; }
+  if(selectedEntity.kind==='deployment'){setError('');setFlowForm({name:'',description:'',kind:'deployment',scope:selectedEntity.id});return;}
   if (['container','database','queue'].includes(selectedEntity.kind)) { openComponentView(); return; }
   void apply({ op: 'view.create', id: ids().replaceAll('.', '_'), viewId: targetView(selectedEntity.id).id, scope: selectedEntity.id, name: `${selectedEntity.name} · Containers`, description: `Internal structure of ${selectedEntity.name}` });
+ }
+ function removeSelectedItem(){
+  if(!selectedEntity)return;
+  if(isFlow){void apply({op:'flow.remove',viewId:view.id,node:selectedEntity.id});return;}
+  setDeleteId(selectedEntity.id);
+ }
+ function openStep(source:string){
+  if(!isFlow||!view.nodes.includes(source))return;
+  props.onConnecting(false);
+  setError('');
+  setStepForm({source,target:'',relationship:'',label:'',protocol:'',phase:'item'});
+ }
+ function addStep(){
+  if(!stepForm?.source||!stepForm.target)return;
+  if(stepForm.relationship){
+   void apply({op:'flow.link',viewId:view.id,relationship:stepForm.relationship});
+   return;
+  }
+  const {source,target,label,protocol}=stepForm;
+  void apply({op:'relation.create',id:ids(),viewId:view.id,source,target,label,protocol,includeEndpoints:true});
  }
  function removeSelectedConnection() {
   if (!selectedRelation) return;
   props.onConnecting(false);
   const targetView = [view, ...model.views].find(candidate => relationsForView(model, candidate).some(relation => relation.id === selectedRelation.id));
   if (!targetView) return;
-  void apply({ op: 'relation.delete', id: selectedRelation.id, viewId: targetView.id });
+  void apply(targetView.type==='dataflow'?{op:'flow.unlink',viewId:targetView.id,relationship:selectedRelation.id}:{op:'relation.delete',id:selectedRelation.id,viewId:targetView.id});
  }
  function undo() {
   try { const next = commands.slice(0,-1); const restored = next.length ? prepareEdits(base, next).files : base; setCommands(next); props.onPreview(restored); setMessage('Last draft change undone.'); setError(''); }
@@ -213,39 +243,99 @@ export function WorkspaceEditor(props: Props) {
  const typeHint = form && 'kind' in form ? elementTypes.find(type => type.id === form.elementType)?.hint : undefined;
  if(props.readOnlyReason)return <div className="workspace-editor"><span>{props.readOnlyReason} · Explore the diagrams and documentation</span></div>;
  const tool=(label:string,icon:React.ReactNode,run:()=>void,disabled=false,className='',pressed?:boolean)=><button type="button" className={`canvas-edit-tool ${className}`} title={label} aria-label={label} aria-pressed={pressed} onClick={run} disabled={busy||disabled}>{icon}<span className="canvas-tool-label">{label}</span></button>;
+ function finishEditing(){
+  if((props.processDirty||view.type==='bpmn'&&changes.length>0)&&!window.confirm('Discard unsaved process changes?'))return;
+  props.onPreview(base);
+  setCommands([]);
+  props.onEditing(false);
+  setError('');setMessage('');
+ }
  const editingTools=<div className="canvas-edit-toolbox" aria-label="Workspace editing tools">
   <div className="canvas-toolbox-status" role="status" title={`${busy?'Saving…':autoSave?'Editing · Auto-save on':'Editing'} · ${commands.length?`${commands.length} draft changes`:'No unsaved changes'}`}><PencilSimple size={17}/><small>{busy?'Saving':commands.length?`${commands.length} draft`:'Editing'}</small></div>
   <div className="canvas-toolbox-buttons" role="toolbar" aria-label="Edit workspace" aria-orientation="vertical" onKeyDown={event=>{if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;const buttons=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];const index=buttons.indexOf(document.activeElement as HTMLButtonElement);if(index<0)return;event.preventDefault();buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}}>
    {tool('Add item',<Plus size={20}/>,()=>openEntity(),view.type==='bpmn')}
    {tool('Add existing item',<PlusCircle size={20}/>,()=>openInclude(),view.type==='bpmn')}
    {tool(props.connecting?'Cancel drawing':'Draw connection',<GitBranch size={20}/>,()=>props.onConnecting(!props.connecting),view.type==='bpmn',props.connecting?'editor-draw-active':'',props.connecting)}
-   {tool('New manual data flow',<Path size={20}/>,()=>{props.onConnecting(false);setError('');setFlowForm({name:'',description:''});})}
+   {tool('New manual data flow',<Path size={20}/>,()=>{props.onConnecting(false);setError('');setFlowForm({name:'',description:'',kind:'flow'});})}
+   {tool('New process',<Path size={20}/>,()=>{props.onConnecting(false);setError('');setFlowForm({name:'',description:'',kind:'process'});})}
+   {tool('New deployment view',<HardDrives size={20}/>,()=>{props.onConnecting(false);setError('');setFlowForm({name:'',description:'',kind:'deployment'});})}
    {tool('C3 · Components',<Cube size={20}/>,openComponentView,view.type==='bpmn')}
    {viewDocumentMoves(model).size>0&&tool('Organize view folders',<FolderSimple size={20}/>,()=>void apply({op:'workspace.organize'}))}
    <span className="canvas-toolbox-divider"/>
    {tool('Edit selected',<PencilSimple size={20}/>,()=>selectedRelation?openRelation():openEntity(true),!selectedEntity&&!selectedRelation)}
-   {selectedEntity&&['system','external','container','database','queue'].includes(selectedEntity.kind)&&tool(childView(model,selectedEntity.id)?'Open next level':'Create next level',<ArrowDownRight size={20}/>,nextLevel)}
-   {selectedEntity&&tool('Delete item',<Trash size={20}/>,()=>setDeleteId(selectedEntity.id),false,'editor-delete')}
-   {selectedRelation&&tool('Delete connection',<Trash size={20}/>,removeSelectedConnection,false,'editor-delete')}
+   {selectedEntity&&['system','external','container','database','queue','deployment'].includes(selectedEntity.kind)&&tool(childView(model,selectedEntity.id)?'Open next level':'Create next level',<ArrowDownRight size={20}/>,nextLevel)}
+   {selectedEntity&&tool(isFlow?'Remove item from flow':'Delete item',<Trash size={20}/>,removeSelectedItem,false,'editor-delete')}
+   {selectedRelation&&tool(isFlow?'Remove connection from flow':'Delete connection',<Trash size={20}/>,removeSelectedConnection,false,'editor-delete')}
    {commands.length>0&&tool('Undo',<ArrowCounterClockwise size={20}/>,undo)}
    <span className="canvas-toolbox-divider"/>
    {tool(props.reviewRequired?'Review & submit':'Review & save',<FloppyDisk size={20}/>,()=>{setError('');setReview(true);},!changes.length,'editor-save')}
-   {tool(changes.length?'Discard draft':'Finish editing',<X size={20}/>,()=>{props.onPreview(base);setCommands([]);props.onEditing(false);setError('');setMessage('');})}
+   {tool(changes.length?'Discard draft':'Finish editing',<X size={20}/>,finishEditing)}
   </div>
   {!props.reviewRequired&&(props.apiToken||props.directoryHandle)&&<label className="canvas-toolbox-autosave" title="Automatically save changes to Markdown"><input type="checkbox" checked={autoSave} disabled={busy||commands.length>0} onChange={event=>setAutoSave(event.target.checked)}/>Auto-save</label>}
  </div>;
- const feedback=editing&&!form&&!review&&!viewForm&&!deletion&&!includeForm&&!flowForm&&(error||message)?<p className={`canvas-toolbox-feedback ${error?'is-error':''}`} role={error?'alert':'status'}>{error||message}</p>:null;
+ const feedback=editing&&!form&&!review&&!viewForm&&!deletion&&!includeForm&&!flowForm&&!stepForm&&(error||message)?<p className={`canvas-toolbox-feedback ${error?'is-error':''}`} role={error?'alert':'status'}>{error||message}</p>:null;
+ const startControls=editing&&isFlow&&<div className="flow-editor-bar nodrag nopan" aria-label="Data flow editor">
+  <span className="flow-start-marker" aria-hidden="true"/> <strong>Start</strong><span aria-hidden="true">→</span>
+  <FlowItemPicker label="First item" items={flowItems} model={model} value={startNode??''} disabled={busy||!flowItems.length}
+   onChange={node=>void apply({op:'flow.start',viewId:view.id,node})}/>
+ </div>;
+ const flowRelationships=stepForm?new Set(relationsForView(model,view).map(link=>link.id)):undefined;
+ const existingLinks=stepForm?model.relations.filter(link=>link.source===stepForm.source&&link.target===stepForm.target&&!flowRelationships?.has(link.id)):[];
  return <>
-  {!editing&&<div className="workspace-editor"><span>Explore your architecture</span><button className="button secondary" onClick={begin} disabled={view.type === 'bpmn' || !!model.importInfo && (!model.importInfo.authoritativeSource || model.importInfo.integrity !== 'verified')} title={model.importInfo && (!model.importInfo.authoritativeSource || model.importInfo.integrity !== 'verified') ? 'View only: a verified canonical DSL source and synchronized snapshot are required for editing.' : undefined}><PencilSimple size={16}/>{props.apiToken || props.directoryHandle ? 'Edit workspace' : 'Connect folder & edit'}</button></div>}
-  {editing&&(props.toolboxTarget?createPortal(<>{editingTools}{feedback}</>,props.toolboxTarget):<>{editingTools}{feedback}</>)}
-  {(form || review || viewForm || deletion || includeForm || flowForm) && <dialog className="modal editor-dialog" ref={dialog} onCancel={event => { event.preventDefault(); if (!busy) closeDialog(); }}>
-   <div className="modal-header"><h2>{flowForm ? 'Create a manual data flow' : includeForm ? 'Add existing items to view' : deletion ? 'Delete item' : review ? props.reviewRequired?'Submit changes for review':'Review changes' : viewForm ? 'C3 · Components inside a container' : form?.op.startsWith('entity') ? form.op.endsWith('create') ? 'Add item' : 'Edit item' : form?.op.endsWith('create') ? 'Add connection' : 'Edit connection'}</h2><button className="icon-button" aria-label="Close editor" onClick={closeDialog} disabled={busy}><X size={19}/></button></div>
-   {flowForm ? <form className="editor-form" onSubmit={event=>{event.preventDefault();void apply({op:'flow.create',id:ids(),name:flowForm.name,description:flowForm.description});}}>
-    <p>Start with three empty bands: L1 people/systems, L2 containers and L3 components. Add model items to their band and draw connections yourself. No sample or path is generated.</p>
+  {!editing&&<div className="workspace-editor"><span>Explore your architecture</span><button className="button secondary" onClick={begin} disabled={!!model.importInfo && (!model.importInfo.authoritativeSource || model.importInfo.integrity !== 'verified')} title={model.importInfo && (!model.importInfo.authoritativeSource || model.importInfo.integrity !== 'verified') ? 'View only: a verified canonical DSL source and synchronized snapshot are required for editing.' : undefined}><PencilSimple size={16}/>{props.apiToken || props.directoryHandle ? 'Edit workspace' : 'Connect folder & edit'}</button></div>}
+  {startControls&&(props.toolboxTarget?.parentElement?createPortal(startControls,props.toolboxTarget.parentElement):startControls)}
+  {editing&&view.type!=='bpmn'&&(props.toolboxTarget?createPortal(<>{editingTools}{feedback}</>,props.toolboxTarget):<>{editingTools}{feedback}</>)}
+  {editing&&view.type==='bpmn'&&<>
+   <div className="workspace-editor bpmn-workspace-actions">
+    <button type="button" className="button secondary" disabled={busy||props.processDirty} onClick={()=>setFlowForm({name:'',description:'',kind:'process'})}>New process</button>
+    {!autoSave&&<button type="button" className="button secondary" disabled={busy||props.processDirty||!changes.length} onClick={()=>{setError('');setReview(true);}}>{props.reviewRequired?'Review & submit':'Review & save'}</button>}
+    <button type="button" className="button secondary" disabled={busy} onClick={finishEditing}>{props.processDirty||changes.length?'Discard changes':'Finish editing'}</button>
+    {(error||message)&&!review&&<span className={error?'editor-error':undefined} role={error?'alert':'status'}>{error||message}</span>}
+   </div>
+   {props.toolboxTarget?.parentElement&&createPortal(<BpmnProcessEditor key={view.id} view={view} model={model}
+    onSave={async(xml,bindings)=>(await apply({op:'process.update',viewId:view.id,xml,bindings}))===true}
+    onDirtyChange={props.onProcessDirty} onEntity={props.onEntity}/>,props.toolboxTarget.parentElement)}
+  </>}
+  {(form || review || viewForm || deletion || includeForm || flowForm || stepForm) && <dialog className="modal editor-dialog" ref={dialog} onCancel={event => { event.preventDefault(); if (!busy) closeDialog(); }}>
+   <div className="modal-header"><h2>{flowForm ? flowForm.kind==='deployment'?'Create deployment view':flowForm.kind==='process'?'Create BPMN process':'Create a manual data flow' : stepForm ? stepForm.phase==='item'?'Add next item':'Connect flow items' : includeForm ? 'Add existing items to view' : deletion ? 'Delete item' : review ? props.reviewRequired?'Submit changes for review':'Review changes' : viewForm ? 'C3 · Components inside a container' : form?.op.startsWith('entity') ? form.op.endsWith('create') ? 'Add item' : 'Edit item' : form?.op.endsWith('create') ? 'Add connection' : 'Edit connection'}</h2><button className="icon-button" aria-label="Close editor" onClick={closeDialog} disabled={busy}><X size={19}/></button></div>
+   {flowForm ? <form className="editor-form" onSubmit={event=>{
+    event.preventDefault();
+    const {name,description,scope,kind}=flowForm;
+    const fields={id:ids(),name,description};
+    if(kind==='deployment')void apply({op:'deployment.create',...fields,...(scope?{scope,parentView:view.id}:{})});
+    else if(kind==='process')void apply({op:'process.create',...fields});
+    else void apply({op:'flow.create',...fields});
+   }}>
+    {flowForm.kind==='flow'&&<p>Choose a first item from the C4 model after creating the flow.</p>}
     <label>Name<input autoFocus required value={flowForm.name} onChange={event=>setFlowForm({...flowForm,name:event.target.value})}/></label>
     <label>Description<textarea required value={flowForm.description} onChange={event=>setFlowForm({...flowForm,description:event.target.value})}/></label>
     {error&&<p className="editor-error" role="alert">{error}</p>}
-    <div className="editor-actions"><button type="button" className="button secondary" disabled={busy} onClick={closeDialog}>Cancel</button><button type="submit" className="button primary" disabled={busy}>Create empty flow</button></div>
+    <div className="editor-actions"><button type="button" className="button secondary" disabled={busy} onClick={closeDialog}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{flowForm.kind==='deployment'?'Create deployment view':flowForm.kind==='process'?'Create process':'Create flow'}</button></div>
+   </form> : stepForm?.phase==='item' ? <form key="flow-item" className="editor-form" onSubmit={event=>{
+    event.preventDefault();
+    if(stepForm.target)setStepForm({...stepForm,phase:'connection',relationship:existingLinks[0]?.id??''});
+   }}>
+    <p>From <strong dir="auto">{model.entities.find(item=>item.id===stepForm.source)?.name}</strong></p>
+    <FlowItemPicker label="Next item" items={flowItems.filter(item=>item.id!==stepForm.source)} model={model} value={stepForm.target} disabled={busy}
+     onChange={target=>setStepForm({...stepForm,target})}/>
+    <div className="editor-actions"><button type="button" className="button secondary" onClick={closeDialog}>Cancel</button><button type="submit" className="button primary" disabled={!stepForm.target}>Continue</button></div>
+   </form> : stepForm ? <form key="flow-connection" className="editor-form" onSubmit={event=>{event.preventDefault();addStep();}}>
+    <div className="drawn-connection-endpoints" aria-label="Flow connection direction">
+     <span dir="auto">{model.entities.find(item=>item.id===stepForm.source)?.name}</span>
+     <span aria-label="to">→</span>
+     <span dir="auto">{model.entities.find(item=>item.id===stepForm.target)?.name}</span>
+    </div>
+    {existingLinks.length>0&&<label>Model connection<select value={stepForm.relationship} disabled={busy} onChange={event=>setStepForm({...stepForm,relationship:event.target.value})}>
+     <option value="">Create a model connection</option>
+     {existingLinks.map(link=><option key={link.id} value={link.id}>{link.label}</option>)}
+    </select></label>}
+    {!stepForm.relationship&&<>
+     <p>A new connection is saved in the shared model.</p>
+     <label>Data transferred<input required dir="auto" value={stepForm.label} onChange={event=>setStepForm({...stepForm,label:event.target.value})}/></label>
+     <label>Protocol (optional)<input dir="auto" value={stepForm.protocol} onChange={event=>setStepForm({...stepForm,protocol:event.target.value})}/></label>
+    </>}
+    {error&&<p className="editor-error" role="alert">{error}</p>}
+    <div className="editor-actions"><button type="button" className="button secondary" disabled={busy} onClick={()=>{setError('');setStepForm({...stepForm,phase:'item'});}}>Back</button><button type="submit" className="button primary" disabled={busy}>{busy?'Saving…':'Add connection'}</button></div>
    </form> : includeForm ? <form className="editor-form" onSubmit={event=>{event.preventDefault();void apply({op:'view.include',viewId:includeForm.viewId,ids:includeForm.ids});}}>
     <p>Reuse existing model items in this view. Their identity and ownership stay unchanged. {includeView?.layout==='levels'?'Only the items are added; draw each connection manually.':'Existing relationships to items in this view are shown too.'}</p>
     <ViewLevelPicker views={model.views.filter(item => item.type !== 'bpmn')} value={includeForm.viewId}

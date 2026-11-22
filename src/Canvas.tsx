@@ -1,10 +1,14 @@
+import {DeploymentPlane} from './DeploymentPlane';
+import {DeploymentGlyph} from './DeploymentGlyph';
+import {deploymentTypes} from '../shared/deployment-types';
 import type {CanvasChanges} from '../shared/history-diff';
 import {TechnologyLogos} from './technology-logos';
+import {isC4FlowItem} from '../shared/view-membership';
 import {abstractionLevel} from '../shared/ownership-frames';
 import { createContext, useContext, useCallback, useMemo, useEffect, useRef, useState } from 'react';
-import { ReactFlow, getViewportForBounds, ConnectionMode, SelectionMode, applyNodeChanges, type NodeChange, Background, Controls, MiniMap, Handle, Position, MarkerType, BaseEdge, getSmoothStepPath, useNodesState, useEdgesState, useNodesInitialized, useNodes, useReactFlow, useStore, type Node, type Edge, type EdgeProps, type NodeProps, type Viewport, type ReactFlowInstance } from '@xyflow/react';
-import { ArrowUpRight, ChatDots, Cube, Database, User, Stack, Globe, Code, HardDrives, Queue, ArrowsOut, CaretUp, Info, Graph, TextT } from '@phosphor-icons/react';
-import { elementTypeLabel } from '../shared/element-types';
+import { ReactFlow, getViewportForBounds, ConnectionMode, SelectionMode, applyNodeChanges, type NodeChange, Background, Controls, MiniMap, Handle, Position, MarkerType, BaseEdge, getSmoothStepPath, useNodesState, useEdgesState, useNodesInitialized, useNodes, useReactFlow, useStore, useUpdateNodeInternals, type Node, type Edge, type EdgeProps, type NodeProps, type Viewport, type ReactFlowInstance } from '@xyflow/react';
+import { ArrowUpRight, ChatDots, Cube, Database, User, Stack, Globe, Code, HardDrives, Queue, ArrowsOut, CaretUp, Info, Graph, TextT, Plus } from '@phosphor-icons/react';
+import { elementTypeLabel,typeForEntity } from '../shared/element-types';
 import { type Model, type Entity, type View, type Relation } from '../shared/model';
 import {portSides} from '../shared/connection-ports';
 import {defaultArrangement,type Arrangement,type LayoutSnapshot} from '../shared/layout-state';
@@ -26,29 +30,51 @@ import type { EditorRequest, ConnectionRequest } from './WorkspaceEditor';
 export const entityIcons = { person: User, system: Stack, external: Globe, container: Cube, database: Database, queue: Queue, component: Code, code: Code, deployment: HardDrives };
 export const entityLabels = { person: 'Person', system: 'Software system', external: 'External system', container: 'Container', database: 'Container · Database', queue: 'Container · Queue', component: 'Component', code: 'Code', deployment: 'Deployment node' };
 export const viewLabels = { context: 'System context', container: 'Containers', component: 'Components', code: 'Code', dataflow: 'Data flow', deployment: 'Deployment', bpmn: 'BPMN process' };
-type DiagramData = { entity: Entity; viewId: string; editing: boolean; drill?: string; active: boolean; direction: 'RIGHT' | 'DOWN'; expanded: boolean; childLevel?: string; scopeTone?: string; entryLabel?: string; layoutKey: string; collapse: () => void; inspect: () => void } & Record<string, unknown>;
+type DiagramData = { entity: Entity; viewId: string; editing: boolean; drill?: string; active: boolean; direction: 'RIGHT' | 'DOWN'; expanded: boolean; childLevel?: string; scopeTone?: string; entryLabel?: string; layoutKey: string; collapse: () => void; inspect: () => void; addNext?: () => void } & Record<string, unknown>;
 type DiagramNode = Node<DiagramData, 'entity'>;
 type FrameNode = Node<{ name: string; description: string; category: string; tone: string; contextEnvelope?:boolean; add?:()=>void; layoutKey: string } & Record<string, unknown>, 'frame'>;
 type CanvasNode = DiagramNode | FrameNode;
+const DeploymentAngle=createContext(false);
 function BoundaryFrame({ data }: NodeProps<FrameNode>) {
  return <div className="deployment-frame" data-tone={data.tone} data-context-envelope={data.contextEnvelope}><div className="frame-title"><strong dir="auto">{data.name}</strong><span>{data.category}</span>{data.add&&<button className="flow-band-add nodrag nopan" onClick={event=>{event.stopPropagation();data.add?.();}}>＋ Add item</button>}</div><p dir="auto">{data.description}</p></div>;
 }
-function EntityNode({ data }: NodeProps<DiagramNode>) {
+function EntityNode({ id,data }: NodeProps<DiagramNode>) {
  const entity = data.entity, level=abstractionLevel(entity), appearance = entityAppearance(entity), Icon = appearanceIcons[appearance];
+ const deployment=entity.kind==='deployment'?deploymentTypes.find(type=>type.id===typeForEntity(entity)):undefined;
+ const angled=useContext(DeploymentAngle);
+ const sculpted=angled&&!data.expanded;
+ const updateNodeInternals=useUpdateNodeInternals();
+ const previousSculpted=useRef(false);
+ useEffect(()=>{
+  if(previousSculpted.current!==sculpted)updateNodeInternals(id);
+  previousSculpted.current=sculpted;
+ },[id,sculpted,updateNodeInternals]);
+ const symbol=deployment?<DeploymentGlyph type={deployment.id}/>:<Icon size={23} weight="duotone"/>;
  const zoom = useStore(state => state.transform[2]);
  const portSize = Math.min(44, Math.max(14, 16 / zoom));
  const handles=<>{portSides.flatMap(side=>[
   ...(['source','target'] as const).map(type=><Handle key={`${type}-${side}`} id={`${type}-${side}`} type={type} position={Position[({left:'Left',right:'Right',top:'Top',bottom:'Bottom'} as const)[side]]} isConnectable={false} className="legacy-route-port" style={{pointerEvents:'none',opacity:0}}/>),
   ...[0,1,2].map(slot=><Handle key={`${side}-${slot}`} id={`port-${side}-${slot}`} type="source" position={Position[({left:'Left',right:'Right',top:'Top',bottom:'Bottom'} as const)[side]]} isConnectable={data.editing} className="canvas-port" aria-label={`Connect ${entity.name}: ${side} point ${slot+1}`} title="Drag from or drop onto this connection point" style={{[side==='left'||side==='right'?'top':'left']:`${[25,50,75][slot]}%`,'--port-size':`${portSize}px`} as React.CSSProperties}/>)
  ])}</>;
- if (data.expanded) return <div className={`scope-boundary ${data.active ? 'is-active' : ''}`} data-level={data.scopeTone}>
-  {handles}<div className="scope-heading"><span className="scope-symbol"><Icon size={23}/></span><div><strong>{entity.name}</strong><span>{data.childLevel} · {data.drill}</span></div><button className="nodrag nopan" aria-label={`Documentation for ${entity.name}`} title="Element documentation" onClick={event => { event.stopPropagation(); data.inspect(); }}><Info size={18}/></button><button className="nodrag nopan scope-collapse" aria-label={`Collapse ${entity.name}`} title="Collapse details" onClick={event => { event.stopPropagation(); data.collapse(); }}><CaretUp size={18}/>Collapse</button></div>
+ if (data.expanded) return <div className={`scope-boundary ${deployment ? 'deployment-scope' : ''} ${data.active ? 'is-active' : ''}`} data-level={data.scopeTone}>
+  {handles}<div className="scope-heading"><span className="scope-symbol">{symbol}</span><div><strong>{entity.name}</strong><span>{deployment?<><b className="deployment-type-label">{deployment.label}</b> · {data.drill}</>:`${data.childLevel} · ${data.drill}`}</span></div><button className="nodrag nopan" aria-label={`Documentation for ${entity.name}`} title="Element documentation" onClick={event => { event.stopPropagation(); data.inspect(); }}><Info size={18}/></button><button className="nodrag nopan scope-collapse" aria-label={`Collapse ${entity.name}`} title="Collapse details" onClick={event => { event.stopPropagation(); data.collapse(); }}><CaretUp size={18}/>Collapse</button></div>
   <span className="scope-caption">{data.entryLabel && <strong className="scope-entry-marker">Data entry · {data.entryLabel} · </strong>}{entity.description}</span>
  </div>;
- return <div className={`entity-node kind-${entity.kind} theme-${appearance} ${data.active ? 'is-active' : ''}`} data-c4-level={level}>
-  {handles}{data.entryLabel && <div className="entry-marker">↳ Data entry · {data.entryLabel}</div>}<div className="entity-top"><span className="entity-symbol"><Icon size={23} weight="duotone"/></span><span className="entity-kind">{level&&<span className="entity-level">{level}</span>}{elementTypeLabel(entity)}</span>{data.drill && <ArrowUpRight size={17} className="drill-arrow"/>}</div>
+ if(sculpted){
+  const shape=deployment?.shape??(entity.kind==='database'?'storage':entity.kind==='external'?'network':'cube');
+  const glyphType=deployment?.id??(shape==='storage'?'infra-database':shape==='network'?'infra-network':'deployment');
+  return <div className={`entity-node kind-deployment deployment-symbol-node ${data.active?'is-active':''}`} data-deployment-shape={shape}>
+   <div className="deployment-symbol-anchor">{handles}<DeploymentGlyph type={glyphType} sculpted icon={deployment?undefined:Icon}/></div>
+   <div className="deployment-symbol-label">
+    <strong className="deployment-type-label" dir="auto">{deployment?.label??elementTypeLabel(entity)}</strong>
+    <span className="deployment-resource-name" dir="auto" title={entity.name}>{entity.name}</span>
+   </div>
+  </div>;
+ }
+ return <div className={`entity-node kind-${entity.kind} theme-${appearance} ${data.active ? 'is-active' : ''}`} data-c4-level={level} data-deployment-shape={deployment?.shape}>
+  {handles}{data.entryLabel && <div className="entry-marker">↳ Data entry · {data.entryLabel}</div>}<div className="entity-top"><span className="entity-symbol">{symbol}</span><span className={`entity-kind${deployment?' deployment-type-label':''}`}>{level&&<span className="entity-level">{level}</span>}{elementTypeLabel(entity)}</span>{data.drill && <ArrowUpRight size={17} className="drill-arrow"/>}</div>
   <div className="entity-name" dir="auto" title={entity.name}>{entity.name}</div><p dir="auto" title={entity.description}>{entity.description}</p>
-  <div className="entity-bottom"><TechnologyLogos technology={entity.technology}/>{data.drill ? <><Stack size={14}/><span>Double-click · {data.drill}</span><span className="node-next">＋</span></> : entity.code.length ? <><Code size={14}/><span>{entity.code.length} code {entity.code.length === 1 ? 'mapping' : 'mappings'}</span><ArrowUpRight size={13}/></> : <><span className="tech-dot"/><span className="entity-technology" dir="auto" title={entity.technology}>{entity.technology || 'View documentation'}</span><ArrowUpRight size={13}/></>}</div>
+  {data.active&&data.addNext?<button type="button" className="entity-bottom flow-node-next nodrag nopan" onClick={event=>{event.stopPropagation();data.addNext?.();}}><Plus size={18}/>Add next item</button>:<div className="entity-bottom"><TechnologyLogos technology={entity.technology}/>{data.drill ? <><Stack size={14}/><span>Double-click · {data.drill}</span><span className="node-next">＋</span></> : entity.code.length ? <><Code size={14}/><span>{entity.code.length} code {entity.code.length === 1 ? 'mapping' : 'mappings'}</span><ArrowUpRight size={13}/></> : <><span className="tech-dot"/><span className="entity-technology" dir="auto" title={entity.technology}>{entity.technology || 'View documentation'}</span><ArrowUpRight size={13}/></>}</div>}
  </div>;
 }
 const nodeTypes = { entity: EntityNode, frame: BoundaryFrame };
@@ -68,6 +94,18 @@ function LinkLabelHint({x, y, revealed}: {x: number; y: number; revealed: boolea
  </g>;
 }
 
+function deploymentEdgePath(sourceX:number,sourceY:number,targetX:number,targetY:number,index:number,count:number){
+ const dx=targetX-sourceX,dy=targetY-sourceY;
+ const diagonal=1/Math.sqrt(3);
+ const alongX=(dx+dy/diagonal)/2;
+ const acrossX=dx-alongX;
+ const offset=(index-(count-1)/2)*12;
+ const firstX=sourceX+alongX/2+offset;
+ const firstY=sourceY+(alongX/2+offset)*diagonal;
+ const secondX=firstX+acrossX;
+ const secondY=firstY-acrossX*diagonal;
+ return [`M ${sourceX} ${sourceY} L ${firstX} ${firstY} L ${secondX} ${secondY} L ${targetX} ${targetY}`,(firstX+secondX)/2,(firstY+secondY)/2] as const;
+}
 function DirectedEdge(props: EdgeProps) {
  const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, markerStart, style, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, interactionWidth, selected, data } = props;
  const smooth = getSmoothStepPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, borderRadius: 8 });
@@ -75,15 +113,18 @@ function DirectedEdge(props: EdgeProps) {
  const route = data?.route as ConnectionRoute | undefined;
  const [hover, setHover] = useState(false);
  const showLinkLabels = useContext(LinkLabels);
+ const angled=useContext(DeploymentAngle);
  const validRoute = route && Math.abs(route.points[0].x - sourceX) < 8 && Math.abs(route.points[0].y - sourceY) < 8 && Math.abs(route.points[route.points.length - 1].x - targetX) < 8 && Math.abs(route.points[route.points.length - 1].y - targetY) < 8;
- const [path, labelX, labelY] = validRoute ? [orthogonalPath(route.points), route.labelX, route.labelY] : channel ? [channel.path, channel.labelX, channel.labelY] : smooth;
+ const [path, labelX, labelY] = angled
+  ? deploymentEdgePath(sourceX,sourceY,targetX,targetY,Number(data?.routeIndex??0),Number(data?.routeCount??1))
+  : validRoute ? [orthogonalPath(route.points), route.labelX, route.labelY] : channel ? [channel.path, channel.labelX, channel.labelY] : smooth;
  const showLabel = selected || hover || (showLinkLabels && !data?.focusMuted);
  const communication = data?.communication as Communication | undefined;
  const color = communication ? protocolStyle(communication.protocol).color : diagramColor('--diagram-edge');
  const textLines = showLabel ? edgeLabelLines(String(label ?? ''), 36, 4, data?.protocolLabel as string | undefined) : [];
  const wrappedLabel = textLines.map((line, index) => <tspan key={index} x={0} dy={index ? '1.25em' : `${-(textLines.length - 1) * 0.625}em`} direction={/[\u0590-\u08ff]/.test(line) ? 'rtl' : 'ltr'} textAnchor={/[\u0590-\u08ff]/.test(line) ? 'end' : 'start'}>{line}</tspan>);
  const duration = Math.max(2.5, (Math.abs(targetX - sourceX) + Math.abs(targetY - sourceY)) / 90);
- return <g className="communication-path" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} data-protocol={communication?.protocol} data-mode={communication?.mode} data-channel={data?.routeIndex as number} data-routed={!!validRoute}>
+ return <g className="communication-path" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} data-protocol={communication?.protocol} data-mode={communication?.mode} data-channel={data?.routeIndex as number} data-routed={angled||!!validRoute} data-angled={angled||undefined}>
   <title>{communication ? `${protocolStyle(communication.protocol).label} · ${communication.mode === 'logical' ? 'Logical notification' : communication.mode === 'brokered' ? 'Via broker' : 'Direct'}` : 'Directed relationship'}{`\n${String(label ?? '')}`}</title>
   <BaseEdge id={id} path={path} markerEnd={markerEnd} markerStart={markerStart} style={style} label={showLabel ? wrappedLabel : undefined} labelX={labelX} labelY={labelY} labelStyle={labelStyle} labelShowBg={labelShowBg} labelBgStyle={labelBgStyle} labelBgPadding={labelBgPadding} labelBgBorderRadius={labelBgBorderRadius} interactionWidth={interactionWidth}/>
   {!showLinkLabels && String(label ?? '').trim() && <LinkLabelHint x={labelX} y={labelY} revealed={showLabel}/>}
@@ -163,6 +204,9 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
  onAction?: (request:Omit<EditorRequest,'nonce'>)=>void; onNavigate?: (id:string)=>void;
  editing?: boolean; connecting?: boolean; onConnecting?: (value: boolean) => void; onConnection?: (request: ConnectionRequest) => void;
 }) {
+ const [angledDeployment,setAngledDeployment]=useState(true);
+ const deploymentView=view.type==='deployment';
+ const isometric=deploymentView&&angledDeployment;
  const [showLinkLabels, setShowLinkLabels] = useState(() => {
   try { return localStorage.getItem(linkLabelsPreference) !== 'off'; }
   catch { return true; }
@@ -187,7 +231,7 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
  const [expansions, setExpansions] = useState<{ model: Model; viewId: string; navigationRevision: number; ids: Set<string> }>(() => ({ model, viewId: view.id, navigationRevision, ids: new Set() }));
  const expanded = (expansions.model === model || editing && expansions.model.project.id === model.project.id) && expansions.viewId === view.id && expansions.navigationRevision === navigationRevision ? expansions.ids : undefined;
  useEffect(() => { if (editing) setExpansions(state => state.model === model || state.model.project.id !== model.project.id ? state : { ...state, model }); }, [model, editing]);
- const layoutKey = canvasLayoutKey(view.id, expanded ?? new Set());
+ const layoutKey = canvasLayoutKey(view.id, expanded ?? new Set())+(isometric?':isometric':'');
  const displayNodes=useMemo(()=>historyChanges?nodes.map(node=>{
   const id=node.type==='entity' ? (node.data.entity as Entity).id : undefined;
   const change=(id && (historyChanges.items[id] ?? historyChanges.viewItems[view.id]?.[id]))
@@ -263,13 +307,14 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
  useEffect(() => { if (!animating) return; const timer = setTimeout(() => setAnimating(false), 950); return () => clearTimeout(timer); }, [animating, layoutKey]);
  const selectionRef = useRef(selection); selectionRef.current = selection;
  const onEntityRef = useRef(onEntity); onEntityRef.current = onEntity;
+ const onActionRef=useRef(onAction);onActionRef.current=onAction;
  useEffect(() => {
   if (view.type === 'bpmn') return;
   let cancelled = false;
   loadingRef.current = true; setLoading(true); setLayoutError('');
   async function layout() {
    try {
-    const result = await layoutCanvas(model, view, expanded ?? new Set(),undefined,new Set(),new Map(),arrangeOptions);
+    const result = await layoutCanvas(model, view, expanded ?? new Set(),undefined,new Set(),new Map(),arrangeOptions,isometric);
     if (cancelled) return;
     const saved = persistArrange.current === layoutKey ? undefined : positions.get(layoutKey);
     automaticRouting.current = persistArrange.current === layoutKey || saved?.routing === 'automatic';
@@ -280,6 +325,7 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
       expanded: node.expanded, childViewId:node.child?.id, childLevel: node.child ? node.child.type === 'deployment' ? 'Infrastructure' : `L${({ context: 1, container: 2, component: 3, code: 4 } as Record<string,number>)[node.child.type] ?? ''}` : undefined,
       scopeTone: node.child?.type === 'deployment' ? `L${Math.min(4, node.id.split('/').length + 1)}` : `L${({ context: 1, container: 2, component: 3, code: 4 } as Record<string,number>)[node.child?.type ?? ''] ?? 2}`,
       entryLabel: node.view.entryPoints.find(entry => entry.node === node.entity.id)?.label,
+      addNext:editing&&!readOnly&&view.type==='dataflow'&&isC4FlowItem(node.entity)&&view.nodes.includes(node.entity.id)?()=>onActionRef.current?.({action:'flow-next',id:node.entity.id,viewId:view.id}):undefined,
       active: selectionRef.current === node.entity.id, layoutKey, collapse: () => toggle(node.id), inspect: () => onEntityRef.current(node.entity.id) },
     }));
     const frameNodes: CanvasNode[] = result.frames.map(frame => ({ id: frame.id, type: 'frame', parentId: frame.parentId, position: saved?.positions[frame.id] && saved.parents?.[frame.id] === frame.parentId ? saved.positions[frame.id] : frame.position,
@@ -331,7 +377,7 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
    } catch (error) { if (!cancelled) { if (persistArrange.current === layoutKey) persistArrange.current = null; setLayoutError(error instanceof Error ? error.message : 'Layout failed'); loadingRef.current = false; setLoading(false); } }
   }
   void layout(); return () => { cancelled = true; };
- }, [model, view, expanded, layoutKey, positions, setNodes, setEdges, toggle, arrangement, editing,arrangeOptions,connectionPorts]);
+ }, [model, view, expanded, layoutKey, positions, setNodes, setEdges, toggle, arrangement, editing,readOnly,arrangeOptions,connectionPorts,isometric]);
  useEffect(() => {
   const focus = graphFocus(instance.current?.getNodes() ?? [], instance.current?.getEdges() ?? [], focusTarget);
   setNodes(nodes => nodes.map(node => {
@@ -348,16 +394,20 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
  const actions:ContextAction[]=[];
  const request=(action:EditorRequest['action'],id?:string,viewId=context?.viewId)=>onAction?.({action,id,viewId});
  if(contextEntity){
-  actions.push({label:'View documentation',run:()=>onEntity(contextEntity.id)},{label:'Edit item',run:()=>request('edit',contextEntity.id)});
+  actions.push({label:'View documentation',run:()=>onEntity(contextEntity.id)});
+  if(view.type==='dataflow'&&view.nodes.includes(contextEntity.id)&&isC4FlowItem(contextEntity))
+   actions.push({label:'Add next item',run:()=>request('flow-next',contextEntity.id,view.id)});
+  actions.push({label:'Edit item',run:()=>request('edit',contextEntity.id)});
   if(child){actions.push({label:'Add existing item inside',run:()=>request('include',contextEntity.id,child.id)},{label:'Open next level',run:()=>onNavigate?.(child.id)},{label:'Add item inside',run:()=>{if(context?.nodeId&&!nodes.find(node=>node.id===context.nodeId)?.data.expanded)toggle(context.nodeId);request('add',contextEntity.id,child.id);}});if(context?.nodeId)actions.push({label:nodes.find(node=>node.id===context.nodeId)?.data.expanded?'Collapse details':'Expand details here',run:()=>toggle(context.nodeId!)});}
-  else if(view.layout!=='levels'&&['system','external','container','database','queue'].includes(contextEntity.kind))actions.push({label:'Create next level',run:()=>request('next',contextEntity.id)});
-  actions.push({label:'Draw connection',run:()=>request('connect',contextEntity.id)},{label:'Delete item…',danger:true,run:()=>request('delete',contextEntity.id)});
- }else if(contextRelation)actions.push({label:'View relationship',run:()=>onRelation(contextRelation)},{label:'Edit connection',run:()=>request('edit',contextRelation.id)},{label:'Delete connection',danger:true,run:()=>request('delete',contextRelation.id)});
+  else if(view.layout!=='levels'&&['system','external','container','database','queue','deployment'].includes(contextEntity.kind))actions.push({label:'Create next level',run:()=>request('next',contextEntity.id)});
+  actions.push({label:'Draw connection',run:()=>request('connect',contextEntity.id)},{label:view.type==='dataflow'?'Remove item from flow':'Delete item…',danger:true,run:()=>request('delete',contextEntity.id)});
+ }else if(contextRelation)actions.push({label:'View relationship',run:()=>onRelation(contextRelation)},{label:'Edit connection',run:()=>request('edit',contextRelation.id)},{label:view.type==='dataflow'?'Remove connection from flow':'Delete connection',danger:true,run:()=>request('delete',contextRelation.id)});
  else actions.push({label:'Add existing item',run:()=>request('include')},{label:'Add item',run:()=>request('add')},{label:'Draw connection',run:()=>request('connect')},{label:'Fit diagram',run:()=>void instance.current?.fitView({padding:0.12,maxZoom:1,minZoom:0.05})},{label:'Clear focus',run:()=>setFocusChoice(null)});
  if(readOnly||model.importInfo&&(!model.importInfo.authoritativeSource||model.importInfo.integrity!=='verified')) for(const action of actions)if(!['View documentation','View relationship','Open next level','Expand details here','Collapse details','Fit diagram','Clear focus'].includes(action.label)){action.disabled=true;action.title=readOnly?'Read-only access.':'View only: connect a verified editable model.';}
- if (view.type === 'bpmn') return <BpmnCanvas view={view} onEntity={onEntity}/>;
- return <div className="diagram-canvas" ref={container} data-editing={editing} data-connecting={editing && (connecting||drawing)} data-transition={animating ? 'expanding' : 'idle'} aria-busy={loading}>
+ if (view.type === 'bpmn') return editing?null:<BpmnCanvas view={view} onEntity={onEntity}/>;
+ return <div className="diagram-canvas" ref={container} data-deployment-view={deploymentView||undefined} data-isometric={isometric||undefined} data-editing={editing} data-connecting={editing && (connecting||drawing)} data-transition={animating ? 'expanding' : 'idle'} aria-busy={loading}>
   {context&&<CanvasContextMenu x={context.x} y={context.y} title={contextEntity?.name??contextRelation?.label??'Canvas'} actions={actions} onClose={()=>setContext(null)}/>}
+  <DeploymentAngle.Provider value={isometric}>
   <LinkLabels.Provider value={showLinkLabels}>
   <ReactFlow ariaLabelConfig={{'controls.fitView.ariaLabel':'Fit diagram to canvas (changes zoom)'}} connectionMode={ConnectionMode.Loose} zIndexMode="manual" elevateNodesOnSelect={false} elevateEdgesOnSelect={false} nodes={displayNodes} edges={displayEdges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
    onInit={flow => { instance.current = flow; }}
@@ -389,14 +439,18 @@ export function DiagramCanvas({ historyChanges,readOnly=false,fullscreen=false, 
    minZoom={0.05} maxZoom={2} zoomOnDoubleClick={false} connectOnClick={false} nodesConnectable={editing} deleteKeyCode={null} proOptions={{ hideAttribution: false }}>
    <ResponsiveViewport layoutKey={renderedKey} revision={revision} positions={positions} animate={animating}/>
    <ConnectionEscape/>
-   <Background color={diagramColor('--diagram-grid')} gap={22} size={1}/><Controls showInteractive={false}/>
+   {isometric?<DeploymentPlane/>:<Background color={diagramColor('--diagram-grid')} gap={22} size={1}/>}<Controls showInteractive={false}/>
    <MiniMap pannable zoomable nodeBorderRadius={4} nodeColor={node => node.type === 'frame' ? diagramColor(`--frame-${node.data.tone}-bg`) : node.data.expanded ? diagramColor(`--scope-${String(node.data.scopeTone).toLowerCase()}-bg`) : (node.data.entity as Entity).kind === 'system' ? diagramColor('--accent') : diagramColor('--diagram-map-node')} maskColor={diagramColor('--diagram-map-mask')}/>
   </ReactFlow>
   </LinkLabels.Provider>
+  </DeploymentAngle.Provider>
   <button type="button" className="canvas-link-labels nodrag nopan" aria-label="Link labels"
    aria-pressed={showLinkLabels} title={showLinkLabels ? 'Show labels only on hover or selection' : 'Show link labels'}
    onClick={toggleLinkLabels}><TextT size={17} aria-hidden="true"/><span>Link labels</span></button>
-  <ConnectionLegend compact={fullscreen} key={view.id} initiallyOpen={view.type !== 'context'}/>
+  {deploymentView&&<button type="button" className="canvas-link-labels deployment-angle-toggle nodrag nopan"
+   aria-label="Isometric deployment view" title={isometric?'Switch to flat view':'Switch to isometric view'} aria-pressed={isometric}
+   onClick={()=>setAngledDeployment(angle=>!angle)}><Cube size={17} aria-hidden="true"/><span>3D view</span></button>}
+  <ConnectionLegend compact={fullscreen} key={view.id} initiallyOpen={view.type !== 'context' && !deploymentView}/>
   <div className="canvas-arrange nodrag nopan"><button title="Arrange by connections and save layout" disabled={loading} onClick={()=>runArrange()}><Graph size={17}/>Arrange</button><select aria-label="Arrangement mode" value={arrangeOptions.mode} disabled={loading} onChange={event=>runArrange({...arrangeOptions,mode:event.target.value as Arrangement['mode']})}><option value="auto">Auto · Connections</option><option value="horizontal">Horizontal flow</option><option value="vertical">Vertical flow</option><option value="row">Single row</option><option value="column">Single column</option><option value="grid">Related grid</option></select><select aria-label="Arrangement spacing" value={arrangeOptions.spacing} disabled={loading} onChange={event=>runArrange({...arrangeOptions,spacing:event.target.value as Arrangement['spacing']})}><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="wide">Wide spacing</option></select></div>
   {focusTarget && <button className="canvas-clear-focus nodrag nopan" onClick={() => setFocusChoice(null)}>Clear focus</button>}
   {!!view.flows.length && <div className="deployment-flow-bar" aria-label="Data input paths"><span>Input path</span>{view.flows.map(flow => <button key={flow.id} aria-pressed={activeFlow?.id === flow.id} title={flow.description} onClick={() => setFlowChoice({ model, viewId: view.id, id: flow.id })}>{flow.name}</button>)}<button aria-pressed={!activeFlow} onClick={() => setFlowChoice({ model, viewId: view.id, id: null })}>All connections</button>{activeFlow && <button onClick={fitInputPath} title="Zoom to the selected data path"><ArrowsOut size={13}/> Fit path</button>}</div>}

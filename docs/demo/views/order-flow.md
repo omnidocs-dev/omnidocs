@@ -11,6 +11,11 @@ nodes:
   - events
   - worker
   - notifications
+  - studio.2ed6a0cc9a52
+  - studio.bac453af604e
+  - checkout
+  - backoffice
+  - web-checkout-client
 relationships:
   - web-api
   - api-pay
@@ -18,8 +23,12 @@ relationships:
   - api-queue
   - queue-worker
   - worker-email
+  - studio.e4a8b1888f4b
 description: Follow a checkout request from the storefront to payment and fulfillment.
 kind: view
+entryPoints:
+  - node: backoffice
+    label: Start
 ---
 
 # Order checkout

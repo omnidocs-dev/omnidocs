@@ -8,9 +8,16 @@ const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).max(160);
 const text = z.string().trim().min(1).max(4000);
 export const editCommandSchema = z.discriminatedUnion('op', [
  z.object({ op: z.enum(['entity.create','entity.update']), id, viewId: id, kind: z.enum(['person','system','external','container','database','queue','component','code','deployment']), elementType: z.enum(elementTypeIds).optional(), name: text, description: text, technology: z.string().trim().max(500).default('') }).strict(),
- z.object({ op: z.enum(['relation.create','relation.update']), id, viewId: id, source: id, target: id, sourceHandle:portSchema.optional(),targetHandle:portSchema.optional(), label: text, protocol: z.string().trim().max(500).default('') }).strict(),
+ z.object({ op: z.enum(['relation.create','relation.update']), id, viewId: id, source: id, target: id, sourceHandle:portSchema.optional(),targetHandle:portSchema.optional(), includeEndpoints:z.literal(true).optional(), label: text, protocol: z.string().trim().max(500).default('') }).strict(),
  z.object({ op: z.literal('view.create'), id: id.regex(/^[a-zA-Z0-9_-]+$/, 'View keys use letters, numbers, underscores, or hyphens.'), viewId: id, scope: id, name: text, description: text }).strict(),
  z.object({op:z.literal('flow.create'),id,name:text,description:text}).strict(),
+ z.object({op:z.literal('process.create'),id,name:text,description:text}).strict(),
+ z.object({op:z.literal('process.update'),viewId:id,xml:z.string().min(1).max(450_000),bindings:z.record(z.string().min(1).max(160),id)}).strict(),
+ z.object({op:z.literal('deployment.create'),id,name:text,description:text,parentView:id.optional(),scope:id.optional()}).strict(),
+ z.object({op:z.literal('flow.start'),viewId:id,node:id}).strict(),
+ z.object({op:z.literal('flow.remove'),viewId:id,node:id}).strict(),
+ z.object({op:z.literal('flow.link'),viewId:id,relationship:id}).strict(),
+ z.object({op:z.literal('flow.unlink'),viewId:id,relationship:id}).strict(),
  z.object({op:z.literal('view.include'),viewId:id,ids:z.array(id).min(1).max(100)}).strict(),
  z.object({op:z.literal('layout.save'),viewId:id,key:z.string().min(1).max(8000),layout:layoutSnapshotSchema}).strict(),
  z.object({ op: z.literal('workspace.organize') }).strict(),

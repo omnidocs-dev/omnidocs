@@ -7,3 +7,12 @@ declare module 'bpmn-js/lib/NavigatedViewer' {
   destroy(): void;
  }
 }
+
+declare module 'saxen' {
+ export class Parser {
+  ns(namespaces:Record<string,string>):void;
+  on(event:'error'|'warn'|'attention'|'closeTag',callback:()=>void):void;
+  on(event:'openTag',callback:(type:string,attributes:()=>Record<string,string>,decode:(value:string)=>string)=>void):void;
+  parse(xml:string):void;
+ }
+}

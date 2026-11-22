@@ -25,6 +25,9 @@ relationships:
     communication:
       protocol: rest
       mode: direct
+  - id: studio.e4a8b1888f4b
+    target: web-checkout-client
+    label: شسیشسی
 code:
   - repository: orbit-backend
     path: cmd/worker

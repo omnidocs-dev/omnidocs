@@ -1,4 +1,5 @@
 import type { Entity, View } from './model.ts';
+import {deploymentTypes,inferDeploymentType} from './deployment-types.ts';
 
 /** Editor subtypes are local metadata; structural C4 kinds remain canonical. */
 export const elementTypes = [
@@ -20,7 +21,7 @@ export const elementTypes = [
  { id:'repository', label:'Repository / Data access', group:'Components · C3', kind:'component', levels:['component','dataflow'], hint:'An internal component for persistence access.' },
  { id:'adapter', label:'Adapter / Integration', group:'Components · C3', kind:'component', levels:['component','dataflow'], hint:'An internal component integrating with other systems.' },
  { id:'code', label:'Code element', group:'Implementation · C4', kind:'code', levels:['code'], hint:'An implementation detail with code mappings.' },
- { id:'deployment', label:'Deployment / Infrastructure node', group:'Deployment', kind:'deployment', levels:['deployment'], hint:'An infrastructure node in a deployment view.' },
+ ...deploymentTypes,
 ] as const;
 export type ElementType = typeof elementTypes[number]['id'];
 export const elementTypeIds = elementTypes.map(type => type.id) as [ElementType, ...ElementType[]];
@@ -29,13 +30,14 @@ export function elementKind(type: ElementType, structurizr: boolean): Entity['ki
  return structurizr && ['database','queue'].includes(kind) ? 'container' : kind;
 }
 export function typesForView(view: View, structurizr: boolean) {
- return elementTypes.filter(type => (type.levels as readonly string[]).includes(view.type) && (!structurizr || !['code','deployment'].includes(type.id)) && type.id !== 'system');
+ return elementTypes.filter(type => (type.levels as readonly string[]).includes(view.type) && (!structurizr || type.kind !== 'code') && type.id !== 'system');
 }
 export function typeForEntity(entity: Entity): ElementType {
  const declared = elementTypes.find(type => type.id === entity.properties['omnidocs.type'] && (type.kind === entity.kind || entity.kind === 'container' && ['database','queue'].includes(type.kind)));
  if (declared) return declared.id;
  if (entity.kind === 'database') return 'database';
  if (entity.kind === 'queue') return 'broker';
+ if (entity.kind === 'deployment') return inferDeploymentType(entity.name,entity.technology??'');
  if (entity.kind !== 'container') return entity.kind;
  const tech = entity.technology ?? '';
  if (!/\b(connect|connector|debezium)\b/i.test(tech)) {

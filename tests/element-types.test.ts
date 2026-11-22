@@ -42,3 +42,32 @@ test('native Markdown preserves a declared cache subtype and supports components
  const result=prepareEdits(files,[{op:'entity.create',id:'qa.cache',viewId:view.id,kind:'database',elementType:'cache',name:'Cache',description:'Stores cached values',technology:'Custom KV'}, {op:'view.create',id:'QaCacheComponents',viewId:view.id,scope:'qa.cache',name:'Cache internals',description:'Internal cache components'}]);
  assert.equal(result.model.entities.find(entity=>entity.id==='qa.cache')?.properties['omnidocs.type'],'cache'); assert.equal(result.model.views.find(view=>view.id==='QaCacheComponents')?.type,'component');
 });
+
+test('deployment views support typed infrastructure without rewriting canonical C4 documents',()=>{
+ const viewId='deployment.prod';
+ const result=prepareEdits(initial,[
+  {op:'deployment.create',id:viewId,name:'Production',description:'Kubernetes and infrastructure'},
+  {op:'entity.create',viewId,id:'cluster',kind:'deployment',elementType:'k8s-cluster',name:'Production cluster',description:'Runs production workloads'},
+  {op:'entity.create',viewId,id:'gateway',kind:'deployment',elementType:'k8s-gateway',name:'Gateway',description:'Routes incoming traffic'},
+  {op:'relation.create',viewId,id:'gateway.cluster',source:'gateway',target:'cluster',label:'Routes to workloads'},
+  {op:'deployment.create',id:'deployment.cluster',scope:'cluster',parentView:viewId,name:'Cluster internals',description:'Workload nodes'},
+  {op:'entity.create',viewId:'deployment.cluster',id:'pod',kind:'deployment',elementType:'k8s-pod',name:'API Pod',description:'Runs the API'},
+ ]);
+ const view=result.model.views.find(item=>item.id===viewId)!;
+ assert(typesForView(view,true).some(type=>type.id==='infra-server'));
+ assert(typesForView(view,true).some(type=>type.id==='k8s-networkpolicy'));
+ assert.equal(typeForEntity(result.model.entities.find(item=>item.id==='pod')!),'k8s-pod');
+ assert.equal(result.model.entities.find(item=>item.id==='pod')?.parent,'cluster');
+ assert.deepEqual(view.relationships,['gateway.cluster']);
+ for(const file of initial)assert.equal(result.files.find(item=>item.path===file.path)?.content,file.content);
+ const deleted=prepareEdits(result.files,[{op:'entity.delete',viewId,id:'cluster',cascade:true}]);
+ assert(!deleted.model.entities.some(item=>item.id==='pod'));
+ for(const file of initial)assert.equal(deleted.files.find(item=>item.path===file.path)?.content,file.content);
+});
+
+test('older deployment nodes get recognizable shapes from their documented technology',async()=>{
+ const model=compileModel(await readWorkspace('docs/demo'));
+ for(const [id,type] of [['prod-workers','k8s-node'],['prod-volumes','k8s-pvc'],['prod-ingress','k8s-ingress']]){
+  assert.equal(typeForEntity(model.entities.find(item=>item.id===id)!),type);
+ }
+});

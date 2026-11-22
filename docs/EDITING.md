@@ -8,7 +8,31 @@ Use **Edit workspace** to enter editing. For local server spaces and connected b
 
 Disable **Auto-save** to stage changes. **Apply to draft** updates only the canvas, **Undo** reverses the latest draft change, and **Review & save** shows before/after file content before persisting it. **Discard draft** restores the loaded files. Undo applies only to unsaved drafts; saved versions are retained under `.omnidocs/history` for manual recovery.
 
-New spaces start with one primary software system, C1 and empty C2. No business architecture or technology is invented. The canonical model is a single Structurizr DSL fence in `architecture-model.md`; `architecture-json.md` is a synchronized locally generated snapshot and `views/*.md` contains derived previews. The source digest and references are checked on every edit. Official Structurizr export/inspection remains pending; this is not official parser certification. Arbitrary Markdown prose editing, BPMN XML modeling, repository edits, and persistence of manually dragged coordinates remain outside this editor's scope.
+New spaces start with one primary software system, C1 and empty C2. No business architecture or technology is invented. The canonical model is a single Structurizr DSL fence in `architecture-model.md`; `architecture-json.md` is a synchronized locally generated snapshot and `views/*.md` contains derived previews. The source digest and references are checked on every edit. Official Structurizr export/inspection remains pending; this is not official parser certification. Arbitrary Markdown prose editing, repository edits, and persistence of manually dragged coordinates remain outside this editor's scope.
+
+## Manual data flows
+
+In edit mode, select **New manual data flow**, enter a name and description, and choose **Create flow**. On the canvas, select **First item** next to **Start**. The picker groups existing items by C4 level, with C2 containers first. In a new or existing data flow, select a C4 item on the canvas in edit mode and click **Add next item** on its card. Select the destination from the C4 model and choose **Continue**. Reuse an existing connection or describe the data transferred, then choose **Add connection** to save the step. The arrows are numbered in the order they are added.
+
+Flow members keep their original model IDs and appear in their C1, C2, or C3 band. Select a member and use **Open in C4 model** in its details to open the corresponding architecture view when one exists. **Remove item from flow** and **Remove connection from flow** remove view references. The shared model retains those items and connections. Save or submit the flow using the workspace's usual editing controls.
+
+## Deployment diagrams
+
+In edit mode, choose **New deployment view** or open an existing diagram under **Deployment**. Choose **Add item** and search the Kubernetes or infrastructure categories. The catalog covers cluster components, workloads, networking, storage, configuration and access, physical servers, VMs, and infrastructure services. Choose **Custom infrastructure** for a resource outside the catalog. Existing deployment nodes use documented names and technologies as visual cues. **Edit selected** sets an explicit type.
+
+**3D view** shows deployment items as isometric symbols, with the type and item name below each symbol. Deployment boundaries appear as colored zones and arrows follow the tilted grid. Flat and isometric views keep separate layout positions for the same model.
+
+Select a deployment item and choose **Create next level** to document its internals. Use **Draw connection** to record communication between items. In a Structurizr-backed workspace these deployment views and nodes are stored in companion Markdown files alongside the canonical C4 model.
+
+## BPMN processes
+
+In edit mode, choose **New process**, give it a name and description, and create it. Open an existing diagram under **Processes** to edit it. Use the BPMN palette to add tasks, events, gateways, pools and lanes. Select an element to see its name and properties.
+
+Choose **Add pool** in the editor sidebar. The first pool encloses the current process. With a pool or lane selected, use **Add lane above**, **Add lane below**, or the split controls. Drag activities between lanes to assign them.
+
+For activities, pools and lanes, **Linked model item** selects a workspace entity by its original ID. The picker includes C4 and deployment items. Linked elements are highlighted, and **Open linked item** opens its documentation.
+
+Choose **Save process** to save the BPMN 2.0 XML and its bindings in the view's Markdown document. In a workspace using drafts or mandatory review, this stages the edit. Use **Review & save** or **Review & submit** to continue the normal workflow.
 
 ## Backend
 

@@ -1,4 +1,4 @@
-import {markdownSource} from './markdown-source.ts';
+import {fencedBlocks,markdownSource} from './markdown-source.ts';
 import {layoutDocumentSchema,readLayoutState} from './layout-state.ts';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
@@ -72,10 +72,46 @@ export function compileModel(files: SourceFile[]): Model {
   const structurizr = importStructurizr(files);
   if (structurizr) {
    try{readLayoutState(files);}catch(error){structurizr.errors.push(`studio/layout.md: ${error instanceof Error?error.message:'Invalid layout'}`);}
-   for(const file of files){try{const {metadata,body}=markdownSource(file);if(metadata.kind!=='view'||metadata.type!=='dataflow')continue;
-    const data=viewSchema.parse(metadata);if([...structurizr.entities,...structurizr.relations,...structurizr.views].some(item=>item.id===data.id))throw new Error(`Duplicate ID ${data.id}`);
-    structurizr.views.push({...data,body,source:file.path,raw:file.content});
-   }catch(error){structurizr.errors.push(`${file.path}: ${error instanceof Error?error.message:'Invalid flow view'}`);}}
+   const supplemental:Entity[]=[];
+   const ids=new Set([...structurizr.entities,...structurizr.relations,...structurizr.views].map(item=>item.id));
+   for(const file of files){
+    try{
+     const {metadata,body}=markdownSource(file);
+     const isDeployment=metadata.kind==='deployment';
+     if(!isDeployment&&(metadata.kind!=='view'||!['dataflow','deployment','bpmn'].includes(metadata.type)))continue;
+     const data=isDeployment?entitySchema.parse(metadata):viewSchema.parse(metadata);
+     if(ids.has(data.id))throw new Error(`Duplicate ID ${data.id}`);
+     ids.add(data.id);
+     if(data.kind==='view')structurizr.views.push({...data,body,source:file.path,raw:file.content,bpmn:data.type==='bpmn'?fencedBlocks(file,'bpmn')[0]:undefined});
+     else{
+      const entity={...data,body,source:file.path,raw:file.content};
+      supplemental.push(entity);
+      structurizr.entities.push(entity);
+     }
+    }catch(error){structurizr.errors.push(`${file.path}: ${error instanceof Error?error.message:'Invalid supplemental diagram document'}`);}
+   }
+   const deploymentIds=new Map(supplemental.map(entity=>[entity.id,entity]));
+   for(const entity of supplemental){
+    const seen=new Set([entity.id]);
+    let parent=entity.parent;
+    while(parent){
+     if(seen.has(parent)){structurizr.errors.push(`${entity.source}: Deployment parent hierarchy contains a cycle.`);break;}
+     seen.add(parent);
+     const owner=deploymentIds.get(parent);
+     if(!owner){structurizr.errors.push(`${entity.source}: Unknown deployment parent "${parent}".`);break;}
+     parent=owner.parent;
+    }
+    for(const relation of entity.relationships){
+     if(ids.has(relation.id))structurizr.errors.push(`${entity.source}: Duplicate relationship ID "${relation.id}".`);
+     ids.add(relation.id);
+     if(!deploymentIds.has(relation.target))structurizr.errors.push(`${entity.source}: Unknown deployment target "${relation.target}".`);
+     structurizr.relations.push({...relation,source:entity.id,file:entity.source});
+    }
+   }
+   for(const view of structurizr.views.filter(view=>view.type==='deployment')){
+    if(view.nodes.some(id=>!deploymentIds.has(id))||view.scope&&!deploymentIds.has(view.scope))
+     structurizr.errors.push(`${view.source}: Deployment views require deployment items and scope.`);
+   }
    validateViewReferences(structurizr.views,structurizr.entities,structurizr.relations,structurizr.errors);return structurizr;
   }
   const entities: Entity[] = [], views: View[] = [], relations: Relation[] = [], errors: string[] = [];
@@ -98,7 +134,7 @@ export function compileModel(files: SourceFile[]): Model {
       if (result.data.kind === 'project') { project = result.data; projectSource = file.path; projectCount++; continue; }
       const document = { ...result.data, body: match[2].trim(), source: file.path, raw: file.content };
       if (result.data.kind === 'view') {
-        const bpmn = match[2].match(/```bpmn\s*\r?\n([\s\S]*?)```/)?.[1];
+        const bpmn = result.data.type==='bpmn'?fencedBlocks(file,'bpmn')[0]:undefined;
         views.push({ ...document, bpmn } as View);
       } else {
         const entity = document as Entity;

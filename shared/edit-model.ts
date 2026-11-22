@@ -1,4 +1,5 @@
-import {canIncludeEntity} from './view-membership.ts';
+import {bpmnBindingIds,starterBpmn} from './bpmn-document.ts';
+import {canIncludeEntity,isC4FlowItem} from './view-membership.ts';
 import {readLayoutState,writeLayoutState} from './layout-state.ts';
 import { planEntityDeletion, deleteNativeEntity } from './entity-deletion.ts';
 import { markdownSource } from './markdown-source.ts';
@@ -25,9 +26,9 @@ function updateMetadata(file: SourceFile, edit: (document: ReturnType<typeof par
 function replaceBlock(file: SourceFile, language: string, content: string) {
  const blocks = fencedBlocks(file, language);
  if (blocks.length !== 1 || file.content.indexOf(blocks[0]) !== file.content.lastIndexOf(blocks[0])) throw new Error(`${file.path}: Expected one unambiguous ${language} block.`);
- return { ...file, content: file.content.replace(blocks[0], content.endsWith('\n') ? content : `${content}\n`) };
+ return { ...file, content: file.content.replace(blocks[0], () => content.endsWith('\n') ? content : `${content}\n`) };
 }
-function validateCommand(model: Model, command: Exclude<EditCommand, {op:'workspace.organize'|'layout.save'|'flow.create'}>) {
+function validateCommand(model: Model, command: Exclude<EditCommand, {op:'workspace.organize'|'layout.save'|'deployment.create'|'process.create'|'process.update'|'flow.create'|'flow.start'|'flow.remove'|'flow.link'|'flow.unlink'}>) {
  const view = model.views.find(view => view.id === command.viewId); if (!view) throw new Error('The target view no longer exists.');
  if (view.type === 'bpmn') throw new Error('BPMN XML editing is not supported by the architecture editor.');
  if(command.op==='view.include'){
@@ -78,7 +79,7 @@ function validateCommand(model: Model, command: Exclude<EditCommand, {op:'worksp
  }
  return view;
 }
-function nativeEdit(files: SourceFile[], model: Model, command: Exclude<EditCommand, {op:'workspace.organize'|'layout.save'|'flow.create'}>) {
+function nativeEdit(files: SourceFile[], model: Model, command: Exclude<EditCommand, {op:'workspace.organize'|'layout.save'|'deployment.create'|'process.create'|'process.update'|'flow.create'|'flow.start'|'flow.remove'|'flow.link'|'flow.unlink'}>) {
  const view = model.views.find(view => view.id === command.viewId)!;
  if(command.op==='entity.delete')return deleteNativeEntity(files,model,planEntityDeletion(model,command.id));
  const put = (file: SourceFile) => { const index = files.findIndex(item => item.path === file.path); if (index < 0) files.push(file); else files[index] = file; };
@@ -156,7 +157,7 @@ function nativeEdit(files: SourceFile[], model: Model, command: Exclude<EditComm
  return files;
 }
 
-function structurizrEdit(files: SourceFile[], model: Model, command: Exclude<EditCommand, {op:'workspace.organize'|'layout.save'|'flow.create'}>) {
+function structurizrEdit(files: SourceFile[], model: Model, command: Exclude<EditCommand, {op:'workspace.organize'|'layout.save'|'deployment.create'|'process.create'|'process.update'|'flow.create'|'flow.start'|'flow.remove'|'flow.link'|'flow.unlink'}>) {
  const info = model.importInfo!;
  if (!info.authoritativeSource || info.integrity !== 'verified') throw new Error('Structurizr editing requires a verified Markdown DSL source and snapshot.');
  const source = files.find(file => file.path === info.authoritativeSource)!, snapshot = files.find(file => file.path === info.source)!;
@@ -292,32 +293,124 @@ export function prepareEdits(source: SourceFile[], inputs: unknown[]) {
  let semanticChanges=false;
  if (!inputs.length || inputs.length > 100) throw new Error('Save between 1 and 100 changes at a time.');
  for (const input of inputs) {
-  const command = editCommandSchema.parse(input), model = compileModel(files);
+  const command = editCommandSchema.parse(input);
+  let model = compileModel(files);
   if (model.errors.length) throw new Error(model.errors.join('\n'));
+  if(command.op==='process.create'){
+   if([...model.views,...model.entities,...model.relations].some(item=>item.id===command.id))throw new Error('This ID already exists.');
+   const path=viewDocumentPath('bpmn',undefined,command.id);
+   if(files.some(file=>file.path===path))throw new Error('The process document already exists.');
+   const {op:_op,...metadata}=command;
+   const fence='`'.repeat(3);
+   files.push({path,content:`---\n${stringify({...metadata,kind:'view',type:'bpmn',bindings:{}})}---\n# ${command.name.replace(/[\r\n]/g,' ')}\n\n${fence}bpmn\n${starterBpmn}${fence}\n`});
+   continue;
+  }
+  if(command.op==='process.update'){
+   const view=model.views.find(view=>view.id===command.viewId&&view.type==='bpmn');
+   if(!view)throw new Error('Choose an existing BPMN process.');
+   const validIds=bpmnBindingIds(command.xml);
+   for(const [element,id] of Object.entries(command.bindings)){
+    if(!validIds.has(element)||!model.entities.some(item=>item.id===id))throw new Error('Each BPMN binding needs an existing activity, participant or lane and an existing model item.');
+   }
+   files=files.map(file=>file.path===view.source?updateMetadata(replaceBlock(file,'bpmn',command.xml),doc=>doc.set('bindings',command.bindings)):file);
+   continue;
+  }
+  if(command.op==='deployment.create'){
+   if([...model.views,...model.entities,...model.relations].some(item=>item.id===command.id))throw new Error('This ID already exists.');
+   if(command.scope){
+    const parent=model.views.find(view=>view.id===command.parentView&&view.type==='deployment');
+    if(!parent?.nodes.includes(command.scope)||!model.entities.some(entity=>entity.id===command.scope&&entity.kind==='deployment'))
+     throw new Error('Choose a deployment item in the parent view.');
+    if(model.views.some(view=>view.type==='deployment'&&view.scope===command.scope))throw new Error('This item already has a deployment view.');
+   }else if(command.parentView)throw new Error('A nested deployment view needs a scope.');
+   const path=viewDocumentPath('deployment',command.scope,command.id);
+   if(files.some(file=>file.path===path))throw new Error('The deployment document already exists.');
+   const {op:_op,...metadata}=command;
+   files.push({path,content:`---\n${stringify({...metadata,kind:'view',type:'deployment',nodes:[],relationships:[],direction:'RIGHT'})}---\n# ${command.name.replace(/[\r\n]/g,' ')}\n`});
+   continue;
+  }
   if(command.op==='flow.create'){
    if([...model.views,...model.entities,...model.relations].some(item=>item.id===command.id))throw new Error('This ID already exists.');
    const path=viewDocumentPath('dataflow',undefined,command.id);if(files.some(file=>file.path===path))throw new Error('The flow document already exists.');
-   files.push({path,content:`---\n${stringify({id:command.id,kind:'view',type:'dataflow',layout:'levels',name:command.name,description:command.description,nodes:[],relationships:[],direction:'RIGHT'})}---\n# ${command.name.replace(/[\r\n]/g,' ')}\n\nBuild this flow manually from shared model elements. The three bands show abstraction levels, not ownership boundaries.\n`});continue;
+   files.push({path,content:`---\n${stringify({id:command.id,kind:'view',type:'dataflow',layout:'levels',name:command.name,description:command.description,nodes:[],relationships:[],direction:'RIGHT'})}---\n# ${command.name.replace(/[\r\n]/g,' ')}\n\n\n`});continue;
+  }
+  if(command.op==='flow.start'||command.op==='flow.remove'||command.op==='flow.link'||command.op==='flow.unlink'){
+   const flow=model.views.find(view=>view.id===command.viewId&&view.type==='dataflow');
+   if(!flow)throw new Error('Choose a data flow.');
+   const relation='relationship' in command?model.relations.find(item=>item.id===command.relationship):undefined;
+   const references='node' in command?[command.node]:relation?[relation.source,relation.target]:[];
+   if(!references.length||references.some(id=>{
+    const entity=model.entities.find(item=>item.id===id);
+    return !entity||((command.op==='flow.start'||command.op==='flow.link')&&!isC4FlowItem(entity));
+   }))throw new Error('Choose existing C1, C2 or C3 model items for this flow.');
+   files=files.map(file=>file.path!==flow.source?file:updateMetadata(file,doc=>{
+    if(command.op==='flow.unlink'||command.op==='flow.remove'){
+     const removed=command.op==='flow.unlink'?new Set([command.relationship]):new Set(model.relations.filter(link=>link.source===command.node||link.target===command.node).map(link=>link.id));
+     doc.set('relationships',relationsForView(model,flow).map(link=>link.id).filter(id=>!removed.has(id)));
+     if(flow.flows.length)doc.set('flows',flow.flows.map(path=>({...path,relationships:path.relationships.filter(id=>!removed.has(id))})).filter(path=>path.relationships.length));
+     if(command.op==='flow.remove'){
+      doc.set('nodes',flow.nodes.filter(id=>id!==command.node));
+      doc.set('entryPoints',flow.entryPoints.filter(entry=>entry.node!==command.node));
+      if(flow.boundaries.length)doc.set('boundaries',flow.boundaries.map(frame=>({...frame,nodes:frame.nodes.filter(id=>id!==command.node)})));
+     }
+     return;
+    }
+    doc.set('nodes',[...new Set([...flow.nodes,...references])]);
+    if(command.op==='flow.start')doc.set('entryPoints',[{node:command.node,label:'Start'},...flow.entryPoints.slice(1).filter(entry=>entry.node!==command.node)]);
+    else doc.set('relationships',[...new Set([...relationsForView(model,flow).map(link=>link.id),command.relationship])]);
+   }));
+   continue;
   }
   if (command.op === 'workspace.organize') { files = organizeViewDocuments(files); continue; }
   if(command.op==='layout.save'){
    if(!model.views.some(view=>view.id===command.viewId)||!(command.key===command.viewId||command.key.startsWith(`${command.viewId}:`)))throw new Error('Layout must belong to an existing view.');
    const state=readLayoutState(files);state.layouts[command.key]=command.layout;files=writeLayoutState(files,state);continue;
   }
+  if((command.op==='relation.create'||command.op==='relation.update')&&command.includeEndpoints){
+   const flow=model.views.find(view=>view.id===command.viewId&&view.type==='dataflow');
+   if(!flow||command.op!=='relation.create')throw new Error('Only a new data flow connection can add its endpoints.');
+   const endpoints=[command.source,command.target];
+   if(endpoints.some(id=>!model.entities.some(entity=>entity.id===id&&isC4FlowItem(entity))))throw new Error('Cannot include a missing or non-C4 endpoint in this flow.');
+   files=files.map(file=>file.path!==flow.source?file:updateMetadata(file,doc=>{
+    doc.set('nodes',[...new Set([...flow.nodes,...endpoints])]);
+    doc.set('relationships',relationsForView(model,flow).map(link=>link.id));
+   }));
+   model=compileModel(files);
+  }
   validateCommand(model, command);
   if(command.op==='view.include'&&command.ids.every(id=>model.views.find(view=>view.id===command.viewId)!.nodes.includes(id)))continue;
   semanticChanges=true;
   const target=model.views.find(view=>view.id===command.viewId);
-  files = model.importInfo&&!(command.op==='view.include'&&target?.type==='dataflow') ? structurizrEdit(files, model, command) : nativeEdit(files, model, command);
-  if(model.importInfo){
+  const nativeDeployment=!!model.importInfo&&target?.type==='deployment';
+  if(nativeDeployment){
+   const ids=command.op==='view.include'?command.ids:
+    'kind' in command?(command.kind==='deployment'?[]:[command.id]):
+    'source' in command?[command.source,command.target]:
+    command.op==='entity.delete'?[command.id]:
+    command.op==='relation.delete'?model.relations.filter(link=>link.id===command.id).flatMap(link=>[link.source,link.target]):[];
+   if(command.op==='view.create'||('kind' in command&&command.kind!=='deployment')||
+    ids.some(id=>!model.entities.some(entity=>entity.id===id&&entity.kind==='deployment')))
+    throw new Error('Use deployment items in this view.');
+  }
+  const nativeCompanion=nativeDeployment||command.op==='view.include'&&target?.type==='dataflow';
+  const writableModel=nativeDeployment?{...model,views:model.views.filter(view=>view.type==='deployment'||view.type==='dataflow'||view.type==='bpmn')}:model;
+  files = model.importInfo&&!nativeCompanion ? structurizrEdit(files, model, command) : nativeEdit(files, writableModel, command);
+  if(model.importInfo&&!nativeDeployment){
    const next=compileModel(files),ids=new Set(next.entities.map(entity=>entity.id));
+   if(command.op==='entity.delete'){
+    for(const process of model.views.filter(view=>view.type==='bpmn')){
+     const bindings=Object.entries(process.bindings).filter(([,id])=>ids.has(id));
+     if(bindings.length!==Object.keys(process.bindings).length)
+      files=files.map(file=>file.path===process.source?updateMetadata(file,doc=>doc.set('bindings',Object.fromEntries(bindings))):file);
+    }
+   }
    for(const flow of model.views.filter(view=>view.type==='dataflow')){
     const file=files.find(file=>file.path===flow.source);if(!file)continue;
     const nodes=flow.nodes.filter(id=>ids.has(id));
     const links=(flow.relationships??[]).filter(id=>next.relations.some(link=>link.id===id&&nodes.includes(link.source)&&nodes.includes(link.target)));
     if((command.op==='relation.create'||command.op==='relation.update')&&flow.id===command.viewId&&!links.includes(command.id))links.push(command.id);
     // Inclusion has already written the new node list; other edits only clean invalid references.
-    if(command.op!=='view.include')files=files.map(item=>item.path===flow.source?updateMetadata(file,doc=>{doc.set('nodes',nodes);doc.set('relationships',links);if(flow.flows.length)doc.set('flows',flow.flows.map(step=>({...step,relationships:step.relationships.filter(id=>links.includes(id))})).filter(step=>step.relationships.length));}):item);
+    if(command.op!=='view.include')files=files.map(item=>item.path===flow.source?updateMetadata(file,doc=>{doc.set('nodes',nodes);doc.set('relationships',links);if(flow.entryPoints.length)doc.set('entryPoints',flow.entryPoints.filter(entry=>nodes.includes(entry.node)));if(flow.flows.length)doc.set('flows',flow.flows.map(step=>({...step,relationships:step.relationships.filter(id=>links.includes(id))})).filter(step=>step.relationships.length));}):item);
    }
   }
   if((command.op==='relation.create'||command.op==='relation.update')&&(command.sourceHandle||command.targetHandle)){

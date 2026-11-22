@@ -11,6 +11,7 @@ nodes:
   - repository
   - payments
   - database
+  - studio.abbdc1196502
 description: The components responsible for checkout inside the Backend API.
 kind: view
 ---

@@ -8,6 +8,7 @@ parentView: api-components
 nodes:
   - checkout-http-code
   - checkout-request-code
+  - studio.48a82fcacc9c
 description: Selected Backend handler and request structure inside Checkout Handler.
 ---
 

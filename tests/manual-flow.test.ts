@@ -50,3 +50,60 @@ test('invalid supplemental flow references and duplicate identifiers fail compil
  const invalid=base.files.map(f=>f===flow?{...f,content:f.content.replace('nodes: []','nodes: [missing]')}:f);assert(compileModel(invalid).errors.some(e=>e.includes('Unknown node')));
  assert.throws(()=>prepareEdits(base.files,[create]),/already exists/);
 });
+
+test('flow editor links the start and steps by model ID and removes references without deleting architecture',()=>{
+ const empty=prepareEdits(demo,[create]);
+ const relationship=empty.model.relations.find(link=>link.source==='worker'&&link.target==='notifications')!;
+ assert(relationship);
+ const linked=prepareEdits(empty.files,[
+  {op:'flow.start',viewId:create.id,node:'worker'},
+  {op:'flow.link',viewId:create.id,relationship:relationship.id},
+ ]);
+ const reopened=compileModel(linked.files),flow=reopened.views.find(view=>view.id===create.id)!;
+ assert.deepEqual(reopened.errors,[]);
+ assert.deepEqual(flow.entryPoints,[{node:'worker',label:'Start'}]);
+ assert.deepEqual(flow.nodes,['worker','notifications']);
+ assert.deepEqual(relationsForView(reopened,flow).map(link=>link.id),[relationship.id]);
+ assert.deepEqual(linked.model.entities,empty.model.entities);
+ const detached=prepareEdits(linked.files,[{op:'flow.unlink',viewId:create.id,relationship:relationship.id}]);
+ assert.deepEqual(detached.model.views.find(view=>view.id===create.id)!.relationships,[]);
+ assert(detached.model.relations.some(link=>link.id===relationship.id));
+ const removed=prepareEdits(linked.files,[{op:'flow.remove',viewId:create.id,node:'worker'}]);
+ const remaining=removed.model.views.find(view=>view.id===create.id)!;
+ assert.deepEqual(remaining.nodes,['notifications']);
+ assert.deepEqual(remaining.entryPoints,[]);
+ assert.deepEqual(remaining.relationships,[]);
+ assert(removed.model.entities.some(entity=>entity.id==='worker'));
+ assert(removed.model.relations.some(link=>link.id===relationship.id));
+});
+
+test('a new step adds eligible endpoints atomically in a Structurizr companion flow',()=>{
+ const source=canonical(),empty=prepareEdits(source,[create]);
+ const started=prepareEdits(empty.files,[{op:'flow.start',viewId:create.id,node:'sender'}]);
+ for(const file of source)assert.equal(started.files.find(item=>item.path===file.path)?.content,file.content);
+ const step={op:'relation.create',id:'sender.outbound',viewId:create.id,source:'sender',target:'provider',
+  label:'Sends notification data',protocol:'HTTPS',includeEndpoints:true};
+ const added=prepareEdits(started.files,[step]);
+ const flow=added.model.views.find(view=>view.id===create.id)!;
+ assert.deepEqual(flow.nodes,['sender','provider']);
+ assert.deepEqual(relationsForView(added.model,flow).map(link=>link.id),[step.id]);
+ const deleted=prepareEdits(added.files,[{op:'entity.delete',id:'sender',viewId:'WorkerComponents',cascade:true}]);
+ assert.deepEqual(deleted.model.views.find(view=>view.id===create.id)!.entryPoints,[]);
+ assert.throws(()=>prepareEdits(started.files,[{...step,target:'missing'}]),/Cannot include/);
+ assert.throws(()=>prepareEdits(started.files,[{...step,viewId:'WorkerComponents'}]),/Only a new data flow/);
+});
+
+
+test('an existing data flow can add a C4 step without changing its original layout or relationship order',()=>{
+ const before=compileModel(demo);
+ const original=before.views.find(view=>view.id==='order-flow')!;
+ assert.equal(original.layout,undefined);
+ const result=prepareEdits(demo,[{
+  op:'relation.create',id:'checkout.worker.status',viewId:original.id,source:'worker',target:'orders',
+  label:'Sends fulfillment status',protocol:'HTTPS',includeEndpoints:true,
+ }]);
+ const flow=result.model.views.find(view=>view.id===original.id)!;
+ assert.equal(flow.layout,undefined);
+ assert(flow.nodes.includes('orders'));
+ assert.deepEqual(flow.relationships,[...relationsForView(before,original).map(link=>link.id),'checkout.worker.status']);
+});

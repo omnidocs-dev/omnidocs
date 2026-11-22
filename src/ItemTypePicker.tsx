@@ -1,21 +1,24 @@
+import {DeploymentGlyph} from './DeploymentGlyph';
 import {useRef, useState} from 'react';
 import {
  Broadcast, Check, Circuitry, Code, Cube, Database, File, Globe,
- HardDrives, Lightning, MagnifyingGlass, Plugs, Queue, Stack, Terminal, User, Wrench, DeviceMobile,
+ Lightning, MagnifyingGlass, Plugs, Queue, Stack, Terminal, User, Wrench, DeviceMobile,
 } from '@phosphor-icons/react';
 import {elementTypes, type ElementType} from '../shared/element-types';
+
+type Option = typeof elementTypes[number];
+type ModelType = Exclude<Option,{kind:'deployment'}>['id'];
 
 const icons = {
  person: User, system: Stack, external: Globe, app: Cube, webapp: Globe,
  mobileapp: DeviceMobile, api: Broadcast, worker: Wrench, database: Database,
  cache: Lightning, broker: Queue, storage: File, component: Circuitry,
  controller: Terminal, service: Cube, repository: Database, adapter: Plugs,
- code: Code, deployment: HardDrives,
-} satisfies Record<ElementType, typeof Cube>;
-
-type Option = typeof elementTypes[number];
+ code: Code,
+} satisfies Record<ModelType, typeof Cube>;
 
 function TypeIcon({option}: {option: Option}) {
+ if(option.kind==='deployment')return <DeploymentGlyph type={option.id}/>;
  const Icon = icons[option.id];
  return <span className="item-type-icon" data-kind={option.kind} aria-hidden="true"><Icon size={19} weight="duotone"/></span>;
 }
@@ -30,7 +33,7 @@ export function ItemTypePicker({options, value, disabled, onChange}: {
  const [query, setQuery] = useState('');
  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
  const visible = options.filter(option => {
-  const searchable = `${option.label} ${option.id} ${option.group}`.toLocaleLowerCase();
+  const searchable = `${option.label} ${option.id} ${option.group} ${option.hint}`.toLocaleLowerCase();
   return terms.every(term => searchable.includes(term));
  });
  const groups = [...new Set(visible.map(option => option.group))];
